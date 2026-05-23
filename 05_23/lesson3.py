@@ -9,7 +9,7 @@ print("請猜一個 1 到 100 的數字")
 count = 0
 
 while True:
-    guess = int(input("請輸入你的猜測："))
+    guess = int(input("請輸入你猜測的數字："))
     count += 1
 
     if guess > answer:
