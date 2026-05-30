@@ -30,3 +30,13 @@ student = {'chinese': 85, 'english': 92, 'math': 87, 'history': 73, 'science': 5
 print(student)
 print(student['chinese']) #使用鍵來訪問值
 print(student['english']) #使用鍵來訪問值
+
+#for in 迴圈應用
+scores1 = (85,92,87,73,59)
+for s in scores1:
+    print(s)
+
+student = {'chinese': 85, 'english': 92, 'math': 87, 'history': 73, 'science': 59}
+for key in student:
+    print(key)
+    print(student[key])
