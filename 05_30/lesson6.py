@@ -54,5 +54,21 @@ student_scores = [
 ]
 
 # 範例：列印第一位學生的資料
+# 計算每位學生的總分和平均
+subjects = ["語文", "數學", "英語", "物理", "化學"]
 for student in student_scores:
-	print(student)
+    total = sum(student[subj] for subj in subjects)
+    average = total / len(subjects)
+    student["總分"] = total
+    student["平均"] = average
+
+# 列印所有學生的總分與平均
+print("所有學生總分與平均：")
+for student in student_scores:
+    print(f"{student['學生姓名']}: 總分 {student['總分']}，平均 {student['平均']:.2f}")
+
+# 列出前三名學生
+top_students = sorted(student_scores, key=lambda x: x["總分"], reverse=True)[:3]
+print("\n前三名學生：")
+for rank, student in enumerate(top_students, start=1):
+    print(f"第{rank}名：{student['學生姓名']} - 總分 {student['總分']}，平均 {student['平均']:.2f}")
