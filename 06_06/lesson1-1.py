@@ -16,14 +16,14 @@ print(file.closed)
 import csv
 
 with open("考試分數_3年6班.csv", "r", encoding="utf-8") as file:
-    reader = csv.DictReader(file)
-    print(type(reader))
-    for row in reader:
-        print(row)
+#    reader = csv.DictReader(file)
+#    print(type(reader))
+#    for row in reader:
+#        print(row)
 
-    file.seek(0)
+    print("數學成績優異：")
+    #file.seek(0)
     reader = csv.DictReader(file)
-    print("\n數學成績優異：")
     for row in reader:
         if int(row['數學']) >= 90:
             print(row['學生姓名'], row['數學'])
