@@ -13,7 +13,7 @@ def main():
 
     # 使用requests發送GET請求
     # `:requests.Response` 是類型註解，表示response變數的型態應該是Response物件
-    response:requests.Response = requests.get(url)
+    response:Response = requests.get(url)
     # 使用type()函數打印response物件的實際型態
     print(type(response))
 

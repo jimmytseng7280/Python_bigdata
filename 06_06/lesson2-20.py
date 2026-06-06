@@ -8,7 +8,7 @@ def main():
     print("下載台北市YOUBIKE即時資訊")
 
     response = requests.get(url)
-    #response:requests.Response = requests.get(url)
+    #response:Response = requests.get(url)
     print(type(response))
     # typehint 是一個變數，裡面存放了 url 的資料型態
     # url:str = "https://tcgbusfs.blob.core.windows.net/dotapp/youbike/v2/youbike_immediate.json"
