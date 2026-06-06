@@ -1,6 +1,6 @@
 import requests
 from requests import Response
-import pandas as pd
+import pandas as pd             #將pandas庫導入程式，並簡稱為pd，方便後續使用
 from pathlib import Path
 
 

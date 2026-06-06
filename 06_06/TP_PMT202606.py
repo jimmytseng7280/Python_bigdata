@@ -6,152 +6,229 @@ import pandas as pd
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 
-BASE = "https://www.taiwanbuying.com.tw"
-LIST_URL = "https://www.taiwanbuying.com.tw/ShowOrgYearClose.ASP?OrgID=2971&Y=2025"
+HEADERS = {"User-Agent": "Mozilla/5.0"}
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0"
-}
+SEED_URLS = [
+    "https://cf.ezbid.tw/detail/3.13.31/0081400078",
+]
+
+YEARS_ROC = ["112", "113", "114", "115"]  # 2023~2026
+KEYWORD = "亭置式變壓器"
 
 
-def to_int(text):
+def fetch(url, timeout=30, retry=3):
+    for i in range(retry):
+        try:
+            print("正在爬取：", url)
+            r = requests.get(url, headers=HEADERS, timeout=timeout)
+            r.raise_for_status()
+            r.encoding = "utf-8"
+            return r.text
+        except requests.exceptions.Timeout:
+            print(f"連線超時，重試第 {i + 1} 次")
+            time.sleep(2 + i)
+        except Exception as e:
+            print("錯誤：", e)
+            return ""
+    return ""
+
+
+def lines_from_html(html):
+    soup = BeautifulSoup(html, "html.parser")
+    return [x.strip() for x in soup.get_text("\n", strip=True).split("\n") if x.strip()], soup
+
+
+def money_to_int(text):
     if not text:
         return None
-    m = re.search(r"[\d,]+", text)
+    m = re.search(r"[\d,]+", str(text))
     return int(m.group().replace(",", "")) if m else None
 
 
-def get_html(url):
-    r = requests.get(url, headers=HEADERS, timeout=30)
-    r.raise_for_status()
-    r.encoding = "big5" if "taiwanbuying" in url else "utf-8"
-    return r.text
+def roc_date_to_ad(text):
+    m = re.search(r"(\d{3})/(\d{1,2})/(\d{1,2})", text)
+    if not m:
+        return ""
+    y, mth, d = map(int, m.groups())
+    return f"{y + 1911:04d}/{mth:02d}/{d:02d}"
 
 
 def extract_capacity(text):
-    m = re.search(r"(\d+)\s*KVA", text, re.I)
+    m = re.search(r"(\d+)\s*kVA", text, re.I)
     return f"{m.group(1)}kVA" if m else ""
 
 
-def find_case_links():
-    html = get_html(LIST_URL)
-    soup = BeautifulSoup(html, "html.parser")
+def extract_phase(text):
+    if "單相" in text:
+        return "單相"
+    if "三相" in text:
+        return "三相"
+    return ""
 
-    links = []
 
-    for a in soup.find_all("a", href=True):
-        title = a.get_text(strip=True)
-        href = a["href"]
+def extract_voltage(text):
+    m = re.search(r"(\d+\.?\d*)\s*/\s*(\d+\.?\d*)\s*kV", text, re.I)
+    return m.group(0).replace(" ", "") if m else ""
 
-        if "亭置式變壓器" in title:
-            full_url = urljoin(BASE, href)
-            links.append({
-                "標案名稱": title,
-                "網址": full_url
-            })
 
-    # 去重
-    seen = set()
-    result = []
-    for x in links:
-        if x["網址"] not in seen:
-            seen.add(x["網址"])
-            result.append(x)
+def discover_case_urls(seed_urls):
+    """
+    從已知案子的頁面往外找同類型案號。
+    ezBid 明細頁常會有相關案號連結。
+    """
+    urls = set(seed_urls)
 
-    return result
+    for seed in seed_urls:
+        html = fetch(seed)
+        if not html:
+            continue
+
+        lines, soup = lines_from_html(html)
+        text = "\n".join(lines)
+
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            full = urljoin(seed, href)
+
+            if "/detail/3.13.31/" in full:
+                urls.add(full)
+
+        # 從文字中抓可能案號
+        for case_no in re.findall(r"\b\d{10}\b", text):
+            urls.add(f"https://cf.ezbid.tw/detail/3.13.31/{case_no}")
+
+    return sorted(urls)
 
 
 def parse_case(url):
-    html = get_html(url)
-    soup = BeautifulSoup(html, "html.parser")
-    text = soup.get_text("\n", strip=True)
-    lines = [x.strip() for x in text.split("\n") if x.strip()]
+    html = fetch(url)
+    if not html:
+        return []
+
+    lines, soup = lines_from_html(html)
+    text = "\n".join(lines)
+
+    if KEYWORD not in text:
+        return []
 
     case_no = ""
-    award_date = ""
+    m = re.search(r"\b\d{10}\b", text)
+    if m:
+        case_no = m.group()
 
-    for i, line in enumerate(lines):
-        if "標案案號" in line or "案號" == line:
-            if i + 1 < len(lines):
-                case_no = lines[i + 1]
+    award_date_roc = ""
+    award_date_ad = ""
 
-        if "決標日期" in line or "決標日" in line:
-            if i + 1 < len(lines):
-                award_date = lines[i + 1]
+    for line in lines:
+        if "決標日" in line or "決標日期" in line:
+            award_date_roc = line.replace("決標日：", "").replace("其他:決標日期", "").strip()
+            award_date_ad = roc_date_to_ad(line)
+            break
+
+    # 只保留 2023~2026
+    if award_date_ad:
+        year = int(award_date_ad[:4])
+        if year < 2023 or year > 2026:
+            return []
 
     rows = []
 
     for i, line in enumerate(lines):
-        if "品項名稱" in line:
-            item_name = lines[i + 1] if i + 1 < len(lines) else ""
+        if "品項名稱" not in line:
+            continue
 
-            qty = None
-            amount = None
-            vendor = ""
+        item_name = lines[i + 1] if i + 1 < len(lines) else ""
 
-            for j in range(i, min(i + 60, len(lines))):
-                if "得標廠商" in lines[j] and not vendor:
-                    if j + 1 < len(lines):
-                        vendor = lines[j + 1]
+        if KEYWORD not in item_name:
+            continue
 
-                if "預估需求數量" in lines[j] or "數量" == lines[j]:
-                    if j + 1 < len(lines):
-                        qty = to_int(lines[j + 1])
+        block = lines[i:i + 180]
 
-                if (
-                    "得標廠商原始投標金額" in lines[j]
-                    or "原產地國別得標金額" in lines[j]
-                    or "決標金額" in lines[j]
-                ):
-                    if j + 1 < len(lines):
-                        amount = to_int(lines[j + 1])
+        vendor = ""
+        qty = None
+        amount = None
 
-            if item_name and qty and amount:
-                rows.append({
-                    "案號": case_no,
-                    "決標日期": award_date,
-                    "標案網址": url,
-                    "品項名稱": item_name,
-                    "容量": extract_capacity(item_name),
-                    "得標廠商": vendor,
-                    "數量": qty,
-                    "品項得標金額": amount,
-                    "單一規格單價": round(amount / qty, 0)
-                })
+        for j, b in enumerate(block):
+            if "得標廠商" in b and "原始" not in b and not vendor and j + 1 < len(block):
+                vendor = block[j + 1]
+
+            if "預估需求數量" in b and j + 1 < len(block):
+                qty = money_to_int(block[j + 1])
+
+            # 優先抓真正得標金額
+            if "原產地國別得標金額" in b and j + 1 < len(block):
+                amount = money_to_int(block[j + 1])
+
+            # 備援
+            if amount is None and "得標廠商原始投標金額" in b and j + 1 < len(block):
+                amount = money_to_int(block[j + 1])
+
+        if item_name and vendor and qty and amount:
+            rows.append({
+                "案號": case_no,
+                "決標日_民國": award_date_roc,
+                "決標日_西元": award_date_ad,
+                "得標廠商": vendor,
+                "品項名稱": item_name,
+                "相數": extract_phase(item_name),
+                "電壓": extract_voltage(item_name),
+                "容量": extract_capacity(item_name),
+                "數量": qty,
+                "品項得標金額": amount,
+                "單一規格得標單價": round(amount / qty, 0),
+                "資料來源": url
+            })
 
     return rows
 
 
 def main():
-    case_links = find_case_links()
+    case_urls = discover_case_urls(SEED_URLS)
 
-    print(f"找到 {len(case_links)} 筆亭置式變壓器案件")
+    # 你之前程式已找到的案號，直接補進來
+    extra_urls = [
+        "https://cf.ezbid.tw/detail/3.13.31/0081500019",
+        "https://cf.ezbid.tw/detail/3.13.31/0081500027",
+        "https://cf.ezbid.tw/detail/3.13.31/0081500032",
+        "https://cf.ezbid.tw/detail/3.13.31/0081500037",
+        "https://cf.ezbid.tw/detail/3.13.31/0141500021",
+    ]
+
+    case_urls = sorted(set(case_urls + extra_urls))
+
+    print(f"找到候選案件：{len(case_urls)} 筆")
 
     all_rows = []
 
-    for case in case_links:
-        print("處理：", case["標案名稱"], case["網址"])
-
-        try:
-            rows = parse_case(case["網址"])
-            all_rows.extend(rows)
-            time.sleep(1)
-        except Exception as e:
-            print("失敗：", case["網址"], e)
+    for url in case_urls:
+        rows = parse_case(url)
+        all_rows.extend(rows)
+        time.sleep(1)
 
     df = pd.DataFrame(all_rows)
 
     if df.empty:
-        print("沒有抓到品項明細，可能該網站頁面未公開完整品項表。")
+        print("沒有抓到資料。")
         return
 
-    df = df.sort_values(["決標日期", "容量", "單一規格單價"])
+    df = df.drop_duplicates(
+        subset=["案號", "得標廠商", "品項名稱", "數量", "品項得標金額"]
+    )
 
-    df.to_excel("台電亭置式變壓器_2025至今_單一規格得標單價.xlsx", index=False)
-    df.to_csv("台電亭置式變壓器_2025至今_單一規格得標單價.csv", index=False, encoding="utf-8-sig")
+    df = df.sort_values(
+        ["決標日_西元", "案號", "得標廠商", "容量", "單一規格得標單價"]
+    )
+
+    output_xlsx = "台電_亭置式變壓器_所有廠商_2023_2026_得標單價.xlsx"
+    output_csv = "台電_亭置式變壓器_所有廠商_2023_2026_得標單價.csv"
+
+    df.to_excel(output_xlsx, index=False)
+    df.to_csv(output_csv, index=False, encoding="utf-8-sig")
 
     print(df)
-    print("已輸出 Excel / CSV")
+    print("完成輸出：")
+    print(output_xlsx)
+    print(output_csv)
 
 
 if __name__ == "__main__":
