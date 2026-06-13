@@ -2,6 +2,8 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import ttk, messagebox
 import pandas as pd
+import matplotlib
+matplotlib.use("TkAgg")
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
@@ -42,6 +44,7 @@ root = tk.Tk()
 root.title("學生成績查詢系統")
 root.geometry("1000x800")
 root.configure(bg=COLOR_BG)
+current_canvas = None
 
 def clear_result():
     for item in tree.get_children():
@@ -49,8 +52,17 @@ def clear_result():
 
 
 def clear_plot_area():
+    global current_canvas
     for widget in plot_content.winfo_children():
         widget.destroy()
+    if current_canvas is not None:
+        try:
+            current_canvas.get_tk_widget().destroy()
+        except Exception:
+            pass
+        current_canvas = None
+    plot_content.update_idletasks()
+    root.update_idletasks()
 
 
 def show_df(dataframe):
@@ -96,6 +108,7 @@ def top_subject():
     show_df(result[["學生姓名", subject, "該科排名"]])
 
 def plot_student(name):
+    global current_canvas
     result = df[df["學生姓名"] == name]
     if result.empty:
         clear_plot_area()
@@ -104,7 +117,7 @@ def plot_student(name):
     scores = result.iloc[0][SUBJECTS]
 
     clear_plot_area()
-    fig = Figure(figsize=(8, 4), dpi=100)
+    fig = Figure(figsize=(9, 4.5), dpi=100)
     ax = fig.add_subplot(121)
     ax.bar(scores.index, scores.values, color="#4a90e4")
     ax.set_title(f"{name} 各科成績", fontsize=12, fontweight="bold")
@@ -126,15 +139,22 @@ def plot_student(name):
     table.auto_set_font_size(False)
     table.set_fontsize(9)
     table.scale(1, 1.3)
+    fig.tight_layout()
 
     canvas = FigureCanvasTkAgg(fig, master=plot_content)
-    canvas.draw()
-    canvas.get_tk_widget().pack(fill="both", expand=True)
+    canvas.draw_idle()
+    current_canvas = canvas
+    widget = canvas.get_tk_widget()
+    widget.pack(fill="both", expand=True)
+    widget.update_idletasks()
+    plot_content.update_idletasks()
+    root.update_idletasks()
 
 
 def plot_class_total():
+    global current_canvas
     clear_plot_area()
-    fig = Figure(figsize=(8, 4), dpi=100)
+    fig = Figure(figsize=(9, 4.5), dpi=100)
     ax = fig.add_subplot(111)
     sorted_df = df.sort_values(by="總分", ascending=False)
     ax.bar(sorted_df["學生姓名"], sorted_df["總分"], color="#2ecc71")
@@ -145,15 +165,22 @@ def plot_class_total():
     for i, v in enumerate(sorted_df["總分"]):
         ax.text(i, v + 1, str(v), ha="center", va="bottom", fontsize=9)
     ax.tick_params(axis="x", rotation=45)
+    fig.tight_layout()
 
     canvas = FigureCanvasTkAgg(fig, master=plot_content)
-    canvas.draw()
-    canvas.get_tk_widget().pack(fill="both", expand=True)
+    canvas.draw_idle()
+    current_canvas = canvas
+    widget = canvas.get_tk_widget()
+    widget.pack(fill="both", expand=True)
+    widget.update_idletasks()
+    plot_content.update_idletasks()
+    root.update_idletasks()
 
 
 def plot_subject_avg():
+    global current_canvas
     clear_plot_area()
-    fig = Figure(figsize=(8, 4), dpi=100)
+    fig = Figure(figsize=(9, 4.5), dpi=100)
     ax = fig.add_subplot(111)
     avg_scores = df[SUBJECTS].mean()
     ax.bar(avg_scores.index, avg_scores.values, color="#ff8c4a")
@@ -163,10 +190,16 @@ def plot_subject_avg():
     ax.set_ylim(0, avg_scores.max() + 5)
     for i, v in enumerate(avg_scores.values):
         ax.text(i, v + 1, f"{v:.1f}", ha="center", va="bottom", fontsize=9)
+    fig.tight_layout()
 
     canvas = FigureCanvasTkAgg(fig, master=plot_content)
-    canvas.draw()
-    canvas.get_tk_widget().pack(fill="both", expand=True)
+    canvas.draw_idle()
+    current_canvas = canvas
+    widget = canvas.get_tk_widget()
+    widget.pack(fill="both", expand=True)
+    widget.update_idletasks()
+    plot_content.update_idletasks()
+    root.update_idletasks()
 
 def create_labeled_frame(title):
     frame = tk.Frame(root, bg=COLOR_FRAME_BG, relief="flat")
