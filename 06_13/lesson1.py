@@ -102,7 +102,7 @@ def main():
 
         #output_file = Path(__file__).with_name("youbike_report.pdf")
         output_file = Path.cwd().with_name("youbike_report.pdf") 
-        #Path(__file__) 代表目前這個 Python 程式的檔案路徑，with_name()則是將檔名改為youbike_report.pdf
+        #Path(__file__) 代表目前這個 Python 程式的輸出檔案路徑，with_name()則是將檔名改為youbike_report.pdf
         #使用cwd()取得目前工作目錄，with_name()則是將檔名改為youbike_report.pdf
         
         export_to_pdf(df, output_file)
