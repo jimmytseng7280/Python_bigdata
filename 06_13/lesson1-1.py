@@ -100,11 +100,12 @@ def main():
 
         print(df.head())
 
-        output_file = Path(__file__).with_name("youbike_report0613.pdf")
-        #output_file = Path.cwd().with_name("youbike_report.pdf") 
+        output_file0613 = Path(__file__).with_name("youbike_report1-1_0613.pdf")
+        output_file = Path.cwd().with_name("youbike_report1-1.pdf") 
         #Path(__file__) 代表目前這個 Python 程式的輸出檔案路徑，with_name()則是將檔名改為youbike_report.pdf
         #使用cwd()取得目前工作目錄，with_name()則是將檔名改為youbike_report.pdf
         
+        export_to_pdf(df, output_file0613)
         export_to_pdf(df, output_file)
         #export_to_pdf() 函式會將 DataFrame 轉換成 PDF 格式，並儲存在 output_file 指定的路徑下
 
