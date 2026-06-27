@@ -1,13 +1,17 @@
+import os
 import pandas as pd
 import tkinter as tk
 from tkinter import ttk
 from tkinter.messagebox import showinfo
 
+# 取得目前腳本所在的目錄
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
 
 def load_data():
     """讀取 CSV 並進行資料清洗與預處理"""
-    # 讀取 CSV（預設第一列為欄位名稱）
-    df = pd.read_csv('各鄉鎮市區人口密度.csv')
+    csv_path = os.path.join(BASE_DIR, '各鄉鎮市區人口密度.csv')
+    df = pd.read_csv(csv_path)
 
     # 重新命名欄位為中文
     df.columns = ['統計年', '區域別', '年底人口數', '土地面積', '人口密度']
@@ -31,6 +35,9 @@ def load_data():
 
     # 新增人口密度欄位（人口數 / 土地面積）
     df['人口密度'] = df['人口數'] / df['土地面積']
+
+    # 依人口數遞減排序
+    df = df.sort_values('人口數', ascending=False).reset_index(drop=True)
 
     return df
 
