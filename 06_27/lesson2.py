@@ -1,23 +1,15 @@
-import streamlit as st
-import matplotlib.pyplot as plt
+import pandas as pd
 
-st.title("手機品牌市占率圓餅圖")
+dataFrame = pd.read_csv('各鄉鎮市區人口密度.csv')
+dataFrame.columns = ['統計年', '區域別', '年底人口數', '土地面積', '人口密度']
 
-brands = ["Nokia", "Samsung", "Apple", "Lumia"]
-values = [20, 30, 45, 10]
-colors = ["yellow", "green", "red", "blue"]
-explode = (0.3, 0, 0, 0)
+df = dataFrame.drop(index=0)
+df1 = df.dropna()
+df2 = df1.drop('統計年', axis=1)
 
-fig, ax = plt.subplots()
-ax.pie(
-    values,
-    labels=brands,
-    colors=colors,
-    explode=explode,
-    shadow=True,
-    autopct="%1.1f%%",
-    startangle=180,
-)
-ax.axis("equal")
+df3 = df2.copy()
+df3['年底人口數'] = pd.to_numeric(df3['年底人口數'], errors='coerce')
+df3['年底人口數'] = df3['年底人口數'].astype(int)
 
-st.pyplot(fig)
+print(df3['年底人口數'].dtype)
+print(df3)
