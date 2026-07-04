@@ -59,10 +59,21 @@ def update_table(data):
 def on_query():
     """查詢按鈕的回呼函式：根據關鍵字篩選區域別"""
     keyword = entry.get().strip()
+    combo.set('全部顯示')
     if keyword == '':
         update_table(df)
     else:
         mask = df['區域別'].str.contains(keyword, na=False)
+        update_table(df[mask])
+
+
+def on_combo_select(event):
+    """下拉選單選擇事件：根據選擇的縣市篩選區域別"""
+    selected = combo.get()
+    if selected == '全部顯示':
+        update_table(df)
+    else:
+        mask = df['區域別'].str.contains(selected, na=False)
         update_table(df[mask])
 
 
@@ -76,6 +87,9 @@ root = tk.Tk()
 root.title('台灣鄉鎮市區人口密度查詢系統')
 root.geometry('900x600')
 
+# 提取縣市名稱（區域別前兩個字）
+df['縣市'] = df['區域別'].str[:3]
+
 # 上方控制區
 control_frame = ttk.Frame(root, padding=10)
 control_frame.pack(fill='x')
@@ -86,7 +100,14 @@ entry.pack(side='left', padx=5)
 entry.bind('<Return>', lambda e: on_query())
 
 btn_query = ttk.Button(control_frame, text='查詢', command=on_query)
-btn_query.pack(side='left')
+btn_query.pack(side='left', padx=(5, 15))
+
+ttk.Label(control_frame, text='選擇縣市：').pack(side='left')
+combo_values = ['全部顯示'] + sorted(df['縣市'].unique())
+combo = ttk.Combobox(control_frame, values=combo_values, state='readonly', width=12)
+combo.set('全部顯示')
+combo.pack(side='left', padx=5)
+combo.bind('<<ComboboxSelected>>', on_combo_select)
 
 # 下方表格區
 table_frame = ttk.Frame(root)
