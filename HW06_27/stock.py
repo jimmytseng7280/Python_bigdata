@@ -5,6 +5,8 @@ import matplotlib
 matplotlib.use('TkAgg')                     # 使用 Tkinter 後端
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.patches import Rectangle
+import matplotlib.dates as mdates
 import tkinter as tk
 from tkinter import ttk, messagebox
 import threading
@@ -118,6 +120,15 @@ def get_market_type(code):
             return market
     return '未知'
 
+def calc_kd(df, n=9, k_smooth=3, d_smooth=3):
+    """計算 KD 指標（隨機震盪指標）"""
+    low_n = df['Low'].rolling(n).min()
+    high_n = df['High'].rolling(n).max()
+    rsv = (df['Close'] - low_n) / (high_n - low_n) * 100
+    k = rsv.ewm(span=k_smooth, adjust=False).mean()
+    d = k.ewm(span=d_smooth, adjust=False).mean()
+    return k, d
+
 def fetch_data(symbol, start_date=None, end_date=None):
     """從 yfinance 下載股價資料，自動嘗試 .TW / .TWO 後綴"""
     candidates = [symbol]
@@ -193,9 +204,11 @@ class StockApp:
         ttk.Label(self.info_frame, textvariable=self.info_text,
                   font=('Microsoft JhengHei', 11)).pack(padx=10, pady=8)
 
-        # 圖表區：嵌入 matplotlib
-        self.fig = plt.Figure(figsize=(10, 6), dpi=100)
-        self.ax = self.fig.add_subplot(111)
+        # 圖表區：嵌入 matplotlib（上下兩個子圖）
+        self.fig, (self.ax, self.ax_kd) = plt.subplots(2, 1, figsize=(10, 7), dpi=100,
+                                                        gridspec_kw={'height_ratios': [3, 1]},
+                                                        sharex=True)
+        self.fig.subplots_adjust(hspace=0.08)
         self.canvas = FigureCanvasTkAgg(self.fig, master=root)
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
 
@@ -233,6 +246,7 @@ class StockApp:
         self.btn.config(state=tk.DISABLED, text="查詢中...")
         self.info_text.set("正在下載資料，請稍候...")
         self.ax.clear()
+        self.ax_kd.clear()
         self.canvas.draw()
         threading.Thread(target=self.worker, args=(query, start_text, end_text), daemon=True).start()
 
@@ -261,6 +275,9 @@ class StockApp:
         # 更新資訊區
         close = df['Close']
         latest_date = df.index[-1]
+        k_val, d_val = calc_kd(df)
+        latest_k = k_val.iloc[-1]
+        latest_d = d_val.iloc[-1]
         info = (
             f"{name} ({symbol})    "
             f"市場: {exchange}    "
@@ -269,18 +286,32 @@ class StockApp:
             f"開盤價: {df['Open'].iloc[-1]:.2f}    "
             f"最高價: {df['High'].iloc[-1]:.2f}    "
             f"最低價: {df['Low'].iloc[-1]:.2f}    "
-            f"收盤價: {df['Close'].iloc[-1]:.2f}"
+            f"收盤價: {df['Close'].iloc[-1]:.2f}    "
+            f"K: {latest_k:.2f}    D: {latest_d:.2f}"
         )
         self.info_text.set(info)
 
-        # 繪製均線圖
+        # 繪製 K 線（蠟燭圖）
         self.ax.clear()
-        self.ax.plot(df.index, close, color='black', linewidth=1, label='日線')
-        self.ax.plot(df.index, close.rolling(5).mean(), color='blue', linewidth=1.5, label='週線(5日)')
-        self.ax.plot(df.index, close.rolling(20).mean(), color='green', linewidth=1.5, label='月線(20日)')
-        self.ax.plot(df.index, close.rolling(60).mean(), color='orange', linewidth=1.5, label='季線(60日)')
-        self.ax.plot(df.index, close.rolling(120).mean(), color='purple', linewidth=1.5, label='半年線(120日)')
-        self.ax.plot(df.index, close.rolling(240).mean(), color='red', linewidth=1.5, label='年線(240日)')
+        width = 0.6
+        width2 = 0.05
+        up = df[df['Close'] >= df['Open']]
+        down = df[df['Close'] < df['Open']]
+        # 漲（紅色）
+        self.ax.bar(up.index, up['Close'] - up['Open'], width, bottom=up['Open'], color='red', edgecolor='red')
+        self.ax.bar(up.index, up['High'] - up['Close'], width2, bottom=up['Close'], color='red')
+        self.ax.bar(up.index, up['Low'] - up['Open'], width2, bottom=up['Open'], color='red')
+        # 跌（綠色）
+        self.ax.bar(down.index, down['Close'] - down['Open'], width, bottom=down['Open'], color='green', edgecolor='green')
+        self.ax.bar(down.index, down['High'] - down['Open'], width2, bottom=down['Open'], color='green')
+        self.ax.bar(down.index, down['Low'] - down['Close'], width2, bottom=down['Close'], color='green')
+
+        # 疊加均線
+        self.ax.plot(df.index, close.rolling(5).mean(), color='blue', linewidth=1, label='週線(5日)', alpha=0.8)
+        self.ax.plot(df.index, close.rolling(20).mean(), color='green', linewidth=1, label='月線(20日)', alpha=0.8)
+        self.ax.plot(df.index, close.rolling(60).mean(), color='orange', linewidth=1, label='季線(60日)', alpha=0.8)
+        self.ax.plot(df.index, close.rolling(120).mean(), color='purple', linewidth=1, label='半年線(120日)', alpha=0.8)
+        self.ax.plot(df.index, close.rolling(240).mean(), color='red', linewidth=1, label='年線(240日)', alpha=0.8)
 
         # 標示最高點與最低點
         if not close.empty:
@@ -303,10 +334,34 @@ class StockApp:
         start_str = df.index[0].strftime('%Y-%m-%d')
         end_str = df.index[-1].strftime('%Y-%m-%d')
         self.ax.set_title(f"{symbol} ({start_str} ~ {end_str})", fontsize=14)
-        self.ax.set_xlabel("日期", fontsize=11)
         self.ax.set_ylabel("股價(元)", fontsize=11)
         self.ax.grid(True, linestyle='--', alpha=0.4)
-        self.ax.legend(fontsize=10)
+        self.ax.legend(fontsize=10, loc='upper left')
+
+        # 繪製 KD 指標
+        k_val, d_val = calc_kd(df)
+        self.ax_kd.plot(df.index, k_val, color='blue', linewidth=1.2, label='K值')
+        self.ax_kd.plot(df.index, d_val, color='red', linewidth=1.2, label='D值')
+        self.ax_kd.axhline(y=80, color='gray', linestyle='--', linewidth=0.8, alpha=0.6)
+        self.ax_kd.axhline(y=20, color='gray', linestyle='--', linewidth=0.8, alpha=0.6)
+        self.ax_kd.fill_between(df.index, 80, 100, alpha=0.1, color='red')
+        self.ax_kd.fill_between(df.index, 0, 20, alpha=0.1, color='blue')
+        self.ax_kd.set_ylim(0, 100)
+        self.ax_kd.set_ylabel("KD", fontsize=11)
+        self.ax_kd.set_xlabel("日期", fontsize=11)
+        self.ax_kd.grid(True, linestyle='--', alpha=0.4)
+        self.ax_kd.legend(fontsize=10, loc='upper left')
+
+        # 標示最新 K、D 值
+        latest_k = k_val.iloc[-1]
+        latest_d = d_val.iloc[-1]
+        self.ax_kd.annotate(f'K={latest_k:.1f}', xy=(df.index[-1], latest_k),
+                            xytext=(-60, 10), textcoords='offset points',
+                            fontsize=9, color='blue', fontweight='bold')
+        self.ax_kd.annotate(f'D={latest_d:.1f}', xy=(df.index[-1], latest_d),
+                            xytext=(-60, -15), textcoords='offset points',
+                            fontsize=9, color='red', fontweight='bold')
+
         self.fig.autofmt_xdate()
         self.fig.tight_layout()
         self.canvas.draw()
