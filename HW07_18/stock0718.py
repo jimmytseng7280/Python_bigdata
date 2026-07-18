@@ -2,12 +2,12 @@
 import yfinance as yf
 import pandas as pd
 import numpy as np
+import platform
 import matplotlib
-matplotlib.use('TkAgg')                     # 使用 Tkinter 後端
+matplotlib.use('TkAgg')
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.patches import Rectangle
-import matplotlib.dates as mdates
 import tkinter as tk
 from tkinter import ttk, messagebox
 import threading
@@ -16,6 +16,10 @@ import re
 import urllib3
 import datetime
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# 跨平台中文字型設定
+_IS_MAC = platform.system() == 'Darwin'
+_CHINESE_FONT = 'PingFang TC' if _IS_MAC else 'Microsoft JhengHei'
 
 # twstock 中文名稱對照
 try:
@@ -40,7 +44,7 @@ def label_from_symbol(symbol):
     return f"{name}({base})" if name else base
 
 # 設定中文字型（微軟正黑體）
-plt.rcParams['font.sans-serif'] = ['Microsoft JhengHei']
+plt.rcParams['font.sans-serif'] = [_CHINESE_FONT, 'PingFang TC', 'Heiti TC', 'Microsoft JhengHei', 'Noto Sans CJK TC']
 plt.rcParams['axes.unicode_minus'] = False
 
 # 全域快取與預載資料
@@ -61,7 +65,58 @@ def resolve_symbol(query):
     for name, sym in _NAME_MAP.items():      # 模糊比對中文名
         if q in name:
             return sym
+    # 若預載資料查不到，即時查詢 TWSE/TPEx API
+    try:
+        sym = _lookup_name_via_api(q)
+        if sym:
+            return sym
+    except Exception:
+        pass
     return q
+
+def _lookup_name_via_api(name):
+    """即時查詢 TWSE/TPEx API 將中文名稱轉為股票代號"""
+    import requests as _req
+    # 查上市
+    try:
+        r = _req.get('https://openapi.twse.com.tw/v1/opendata/t187ap03_L',
+                     headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
+        for item in r.json():
+            code = item[[k for k in item if '代號' in k][0]]
+            for key in (k for k in item if '簡稱' in k or '名稱' in k):
+                v = item[key].strip()
+                if v and name in v:
+                    _NAME_MAP[v] = f'{code}.TW'
+                    return f'{code}.TW'
+    except Exception:
+        pass
+    # 查上櫃
+    try:
+        r = _req.get('https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O',
+                     headers={'User-Agent': 'Mozilla/5.0'}, timeout=10, verify=False)
+        for item in r.json():
+            code = item['SecuritiesCompanyCode']
+            for key in ('CompanyAbbreviation', 'CompanyName'):
+                v = item[key].strip()
+                if v and name in v:
+                    _NAME_MAP[v] = f'{code}.TWO'
+                    return f'{code}.TWO'
+    except Exception:
+        pass
+    # 查興櫃
+    try:
+        r = _req.get('https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_R',
+                     headers={'User-Agent': 'Mozilla/5.0'}, timeout=10, verify=False)
+        for item in r.json():
+            code = item['SecuritiesCompanyCode']
+            for key in ('CompanyAbbreviation', 'CompanyName'):
+                v = item[key].strip()
+                if v and name in v:
+                    _NAME_MAP[v] = f'{code}.TWO'
+                    return f'{code}.TWO'
+    except Exception:
+        pass
+    return None
 
 def fetch_chinese_name(symbol):
     """從 Yahoo 奇摩股市爬取股票中文名稱"""
@@ -181,7 +236,7 @@ def calc_correlation(target_symbol, start_date=None, end_date=None):
     for i in range(0, total, batch_size):
         batch = all_tickers[i:i + batch_size]
         try:
-            kwargs = {'auto_adjust': False, 'progress': False, 'threads': True}
+            kwargs = {'auto_adjust': True, 'progress': False, 'threads': True}
             if start_date and end_date:
                 kwargs['start'] = start_date
                 kwargs['end'] = end_date
@@ -192,11 +247,7 @@ def calc_correlation(target_symbol, start_date=None, end_date=None):
                 yield min(i + batch_size, total), total, []
                 continue
             if isinstance(df_batch.columns, pd.MultiIndex):
-                # 多檔股票下載：使用 Adj Close 或 Close
-                if 'Adj Close' in df_batch.columns.get_level_values(0):
-                    close_cols = df_batch['Adj Close']
-                else:
-                    close_cols = df_batch['Close']
+                close_cols = df_batch['Close']
                 for ticker in batch:
                     if ticker in close_cols.columns:
                         s = close_cols[ticker].dropna()
@@ -252,18 +303,7 @@ def calc_correlation(target_symbol, start_date=None, end_date=None):
         results.append((col, name, float(corr_val)))
 
     results.sort(key=lambda x: abs(x[2]), reverse=True)
-    top5 = results[:5]
-
-    # 計算目標 + Top5 的相關矩陣（用於熱力圖）
-    heatmap_symbols = [target_col] + [s[0] for s in top5]
-    heatmap_names = [label_from_symbol(target_col)] + [s[1] for s in top5]
-    heatmap_matrix = None
-    if len(heatmap_symbols) >= 2:
-        subset = returns[heatmap_symbols].dropna()
-        if len(subset) >= 30:
-            heatmap_matrix = subset.corr().values.tolist()
-
-    yield total, total, (top5, heatmap_matrix, heatmap_names)
+    yield total, total, results[:5]
 
 def fetch_data(symbol, start_date=None, end_date=None):
     """從 yfinance 下載股價資料，自動嘗試 .TW / .TWO 後綴"""
@@ -271,27 +311,34 @@ def fetch_data(symbol, start_date=None, end_date=None):
     if '.' not in symbol:
         candidates += [f"{symbol}.TW", f"{symbol}.TWO"]
     for sym in candidates:
-        kwargs = {'auto_adjust': False, 'progress': False}
+        kwargs = {'auto_adjust': True, 'progress': False}
         if start_date and end_date:
             kwargs['start'] = start_date
-            kwargs['end'] = end_date
+            # yfinance end 為 exclusive，加一天確保包含 end_date
+            end_dt = datetime.datetime.strptime(end_date, '%Y-%m-%d') + datetime.timedelta(days=1)
+            kwargs['end'] = end_dt.strftime('%Y-%m-%d')
         else:
             kwargs['period'] = '2y'
         df = yf.download(sym, **kwargs)
         if not df.empty:
-            # 正確攤平 MultiIndex 欄位
             if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(0)
-            # 手動調整：用 Adj Close 替換 Close（如果有）
-            if 'Adj Close' in df.columns:
-                df['Close'] = df['Adj Close']
-                df.drop(columns=['Adj Close'], inplace=True)
+                df.columns = df.columns.droplevel(1)
             try:
                 info = yf.Ticker(sym).info
             except Exception:
                 info = {}
-            return sym, df, info
-    return symbol, pd.DataFrame(), {}
+            # 下載當日分鐘資料計算均價（每筆成交價的簡單平均）
+            avg_price = None
+            try:
+                intraday = yf.download(sym, period='1d', interval='1m', progress=False, auto_adjust=True)
+                if not intraday.empty:
+                    if isinstance(intraday.columns, pd.MultiIndex):
+                        intraday.columns = intraday.columns.droplevel(1)
+                    avg_price = intraday['Close'].mean()
+            except Exception:
+                pass
+            return sym, df, info, avg_price
+    return symbol, pd.DataFrame(), {}, None
 
 class StockApp:
     """臺灣股市查詢系統主視窗"""
@@ -323,7 +370,7 @@ class StockApp:
         date_frame.pack(fill=tk.X, padx=10, pady=5)
 
         today = datetime.datetime.today()
-        default_start = (today - datetime.timedelta(days=730)).strftime('%Y-%m-%d')
+        default_start = '2026-01-01'
         default_end = today.strftime('%Y-%m-%d')
 
         ttk.Label(date_frame, text="開始日期:").pack(side=tk.LEFT)
@@ -339,16 +386,16 @@ class StockApp:
         ttk.Label(date_frame, text="(YYYY-MM-DD)", foreground='gray', font=('', 9)).pack(side=tk.LEFT)
 
         ttk.Label(date_frame, text="    預測天數:").pack(side=tk.LEFT)
-        self.pred_days = tk.StringVar(value="30")
+        self.pred_days = tk.StringVar(value="20")
         pred_combo = ttk.Combobox(date_frame, textvariable=self.pred_days,
-                                  values=["0", "5", "10", "15", "20", "30", "60", "90", "120"], width=5, state='readonly')
+                                  values=["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "15", "20", "30", "60", "90", "120"], width=5, state='readonly')
         pred_combo.pack(side=tk.LEFT, padx=2)
         ttk.Label(date_frame, text="(0=不預測)", foreground='gray', font=('', 9)).pack(side=tk.LEFT)
 
         ttk.Label(date_frame, text="    預測方法:").pack(side=tk.LEFT)
-        self.pred_method = tk.StringVar(value="多項式")
+        self.pred_method = tk.StringVar(value="全部")
         method_combo = ttk.Combobox(date_frame, textvariable=self.pred_method,
-                                    values=["全部", "線性", "多項式", "蒙地卡羅", "指數平滑", "MA交叉", "布林通道"],
+                                    values=["全部", "AI預測", "XGBoost", "隨機森林", "LightGBM", "CatBoost", "GBoost", "ExtraTree", "Stacking", "線性", "多項式", "蒙地卡羅", "指數平滑", "MA交叉", "布林通道"],
                                     width=8, state='readonly')
         method_combo.pack(side=tk.LEFT, padx=2)
 
@@ -357,9 +404,8 @@ class StockApp:
         self.info_frame.pack(fill=tk.X, padx=10, pady=(0, 5))
 
         self.info_text = tk.StringVar()
-        self.info_label = tk.Label(self.info_frame, textvariable=self.info_text,
-                                   font=('Microsoft JhengHei', 11), fg='black')
-        self.info_label.pack(padx=10, pady=8)
+        ttk.Label(self.info_frame, textvariable=self.info_text,
+                  font=(_CHINESE_FONT, 11)).pack(padx=10, pady=8)
 
         # 相關係數區：顯示前五名高相關股票
         self.corr_frame = ttk.LabelFrame(root, text="日報酬率相關係數 Top 5")
@@ -367,7 +413,7 @@ class StockApp:
 
         self.corr_text = tk.StringVar(value="查詢後自動計算...")
         ttk.Label(self.corr_frame, textvariable=self.corr_text,
-                  font=('Microsoft JhengHei', 10), justify=tk.LEFT).pack(padx=10, pady=6, anchor=tk.W)
+                  font=(_CHINESE_FONT, 10), justify=tk.LEFT).pack(padx=10, pady=6, anchor=tk.W)
 
         # 旋轉動畫狀態
         self._spinner_running = False
@@ -403,7 +449,6 @@ class StockApp:
         self.canvas.mpl_connect('button_press_event', self._on_press)
         self.canvas.mpl_connect('button_release_event', self._on_release)
         self.canvas.mpl_connect('motion_notify_event', self._on_motion)
-        self.canvas.mpl_connect('motion_notify_event', self._on_hover)
         self._dragging = False
         self._drag_start = None
         self._drag_xlim_start = None
@@ -415,11 +460,7 @@ class StockApp:
         self._in_xlim_change = False
         self._last_df = None
         self._last_symbol = None
-        # 十字準線元件
-        self._crosshair_hline = None
-        self._crosshair_vline = None
-        self._crosshair_price_label = None
-        self._crosshair_date_label = None
+        self._x_pos = None
         self._ma_texts = []  # MA數值標注
 
         # 刻度自動調整
@@ -495,13 +536,15 @@ class StockApp:
         self.canvas.draw_idle()
 
     def _on_press(self, event):
-        """左鍵：無拖曳時顯示浮動視窗、拖曳平移；雙擊還原"""
+        """左鍵：顯示該日收盤價及成交量；雙擊還原全範圍；拖曳平移"""
         if self._last_df is None:
             return
         if event.inaxes not in (self.ax, self.ax_vol, self.ax_kd):
             return
         if event.dblclick:
-            self._set_xlim_all(self._last_df.index[0], self._last_df.index[-1])
+            # 重設為全範圍（含預測區域）
+            total = len(self._date_index) if hasattr(self, '_date_index') else len(self._last_df)
+            self._set_xlim_all(-0.5, total - 0.5)
             return
         if event.button == 1:
             self._dragging = True
@@ -510,21 +553,13 @@ class StockApp:
             self._press_x = event.x
             self._press_y = event.y
             self._pressed_in_ax = event.inaxes
+            self._show_click_popup(event)
 
     def _on_release(self, event):
-        """滑鼠放開：若無明顯移動則顯示浮動視窗"""
-        was_dragging = self._dragging
+        """滑鼠放開：結束拖曳"""
         self._dragging = False
         self._drag_start = None
         self._drag_xlim_start = None
-        # 判斷是否為「點擊」（滑鼠移動 < 5 像素）
-        if was_dragging and hasattr(self, '_press_x') and event.x is not None:
-            dx = abs(event.x - self._press_x)
-            dy = abs(event.y - self._press_y)
-            if dx < 5 and dy < 5 and self._last_df is not None:
-                # 只要 xdata 有效就在 K 線圖上顯示
-                if event.inaxes == self.ax or event.xdata is not None:
-                    self._show_click_popup(event)
 
     def _on_motion(self, event):
         """拖曳平移"""
@@ -535,168 +570,124 @@ class StockApp:
         dx = event.xdata - self._drag_start
         xmin, xmax = self._drag_xlim_start
         self._set_xlim_all(xmin + dx, xmax + dx)
+        self.canvas.draw_idle()
 
     def _show_click_popup(self, event):
-        """點擊K線時顯示浮動視窗，顯示當天完整交易資料"""
+        """點擊K線時在圖表上顯示該日收盤價及成交量"""
         if self._last_df is None or event.xdata is None:
             return
         df = self._last_df
-        ts = pd.Timestamp(mdates.num2date(event.xdata))
-        nearest = df.index.get_indexer([ts], method='nearest')[0]
+        nearest = int(round(event.xdata))
         if nearest < 0 or nearest >= len(df):
             return
-        day = df.index[nearest]
         row = df.iloc[nearest]
+        day = df.index[nearest]
 
-        # KD 值
-        k_val, d_val = calc_kd(df)
-        k_now = k_val.iloc[nearest]
-        d_now = d_val.iloc[nearest]
+        # 清除舊的點擊標注
+        if self._click_annotation is not None:
+            try: self._click_annotation.remove()
+            except Exception: pass
+            self._click_annotation = None
 
-        # 建立浮動視窗
-        popup = tk.Toplevel(self.root)
-        popup.title(f"{day.strftime('%Y-%m-%d')} 交易資料")
-        popup.geometry("320x280")
-        popup.configure(bg='#1a1a2e')
-        popup.resizable(False, False)
-        popup.transient(self.root)
-        popup.grab_set()
+        color = '#ef4444' if row['Close'] >= row['Open'] else '#22c55e'
+        vol_text = f"{row['Volume']/1000:,.0f}張"
 
-        # 視窗居中
-        popup.update_idletasks()
-        px = self.root.winfo_x() + (self.root.winfo_width() - 320) // 2
-        py = self.root.winfo_y() + (self.root.winfo_height() - 280) // 2
-        popup.geometry(f"+{px}+{py}")
+        day_str = day.strftime('%Y-%m-%d') if hasattr(day, 'strftime') else str(day)
+        text = f"{day_str}\n收盤價: {row['Close']:.2f}\n成交量: {vol_text}"
 
-        title_color = '#e0e0e0'
-        bg = '#1a1a2e'
-        row_bg = '#16213e'
+        ax = event.inaxes
+        if ax == self.ax:
+            x, y = nearest, row['Close']
+        elif ax == self.ax_vol:
+            x, y = nearest, row['Volume']
+        else:
+            x, y = nearest, row['Close']
 
-        # 標題
-        tk.Label(popup, text=f"  {day.strftime('%Y-%m-%d')} ({day.strftime('%A')})",
-                 font=('Microsoft JhengHei', 12, 'bold'), fg='#00bcd4', bg=bg).pack(fill=tk.X, pady=(10, 5))
-
-        # 資料表格
-        data = [
-            ("開盤價", f"{row['Open']:.2f}", '#ef4444' if row['Close'] >= row['Open'] else '#22c55e'),
-            ("最高價", f"{row['High']:.2f}", '#ef4444' if row['Close'] >= row['Open'] else '#22c55e'),
-            ("最低價", f"{row['Low']:.2f}", '#ef4444' if row['Close'] >= row['Open'] else '#22c55e'),
-            ("收盤價", f"{row['Close']:.2f}", '#ef4444' if row['Close'] >= row['Open'] else '#22c55e'),
-            ("成交量", f"{row['Volume']:,.0f}", '#e0e0e0'),
-            ("漲跌", f"{row['Close'] - row['Open']:+.2f}",
-             '#ef4444' if row['Close'] >= row['Open'] else '#22c55e'),
-            ("K 值", f"{k_now:.2f}", '#00bcd4'),
-            ("D 值", f"{d_now:.2f}", '#ffeb3b'),
-        ]
-
-        table_frame = tk.Frame(popup, bg=bg)
-        table_frame.pack(fill=tk.BOTH, expand=True, padx=15, pady=5)
-        table_frame.columnconfigure(1, weight=1)
-
-        for i, (label, value, color) in enumerate(data):
-            r_bg = row_bg if i % 2 == 0 else bg
-            tk.Label(table_frame, text=label, font=('Microsoft JhengHei', 10),
-                     fg='#aaaaaa', bg=r_bg, anchor='w').grid(row=i, column=0, sticky='w', padx=(10, 5), pady=4)
-            tk.Label(table_frame, text=value, font=('Microsoft JhengHei', 10, 'bold'),
-                     fg=color, bg=r_bg, anchor='e').grid(row=i, column=1, sticky='e', padx=(5, 10), pady=4)
-
-        # 關閉按鈕
-        tk.Button(popup, text="關閉", command=popup.destroy, font=('Microsoft JhengHei', 10),
-                  bg='#333333', fg='white', activebackground='#555555', relief=tk.FLAT,
-                  padx=20, pady=5).pack(pady=(5, 10))
+        self._click_annotation = ax.annotate(
+            text, xy=(x, y),
+            xytext=(15, 15), textcoords='offset points',
+            fontsize=9, color='white', fontfamily=_CHINESE_FONT,
+            bbox=dict(boxstyle='round,pad=0.4', facecolor=color, edgecolor='white', alpha=0.85),
+            arrowprops=dict(arrowstyle='-', color='white', lw=0.5),
+            zorder=30)
+        self.canvas.draw_idle()
 
     def _on_xlim_change(self, ax):
         """縮放時自動調整刻度密度（不含 draw，由 scroll handler 處理）"""
-        if getattr(self, '_in_xlim_change', False):
+        if getattr(self, '_in_xlim_change', False) or self._last_df is None:
             return
         self._in_xlim_change = True
         try:
             xmin, xmax = ax.get_xlim()
             span = xmax - xmin
             if span <= 30:
-                loc = mdates.DayLocator()
-                fmt = mdates.DateFormatter('%m/%d')
+                step = 1
             elif span <= 90:
-                loc = mdates.WeekdayLocator(interval=1)
-                fmt = mdates.DateFormatter('%m/%d')
+                step = 5
             elif span <= 365:
-                loc = mdates.MonthLocator()
-                fmt = mdates.DateFormatter('%Y-%m')
+                step = 20
             else:
-                loc = mdates.MonthLocator(interval=3)
-                fmt = mdates.DateFormatter('%Y-%m')
+                step = 60
+            date_index = getattr(self, '_date_index', self._last_df.index)
+            n = len(date_index)
+            def fmt(x, pos):
+                idx = int(round(x))
+                if 0 <= idx < n:
+                    return date_index[idx].strftime('%Y/%m')
+                return ''
+            loc = plt.MultipleLocator(step)
             for a in (self.ax, self.ax_vol, self.ax_kd):
                 a.xaxis.set_major_locator(loc)
-                a.xaxis.set_major_formatter(fmt)
+                a.xaxis.set_major_formatter(plt.FuncFormatter(fmt))
         finally:
             self._in_xlim_change = False
 
-    def _clear_crosshair(self):
-        """清除十字準線"""
-        for artist in (self._crosshair_hline, self._crosshair_vline, self._crosshair_price_label):
-            if artist is not None:
-                try: artist.remove()
-                except Exception: pass
-        self._crosshair_hline = None
-        self._crosshair_vline = None
-        self._crosshair_price_label = None
 
-    def _on_hover(self, event):
-        """十字準線 + 右側價格標籤"""
-        if self._last_df is None:
-            return
-        if self._dragging:
-            return
-        if event.inaxes != self.ax and event.inaxes != self.ax_vol and event.inaxes != self.ax_kd:
-            self._clear_crosshair()
-            self.canvas.draw_idle()
-            return
-        if event.xdata is None or event.ydata is None:
-            return
-
-        df = self._last_df
-        ts = pd.Timestamp(mdates.num2date(event.xdata))
-        nearest = df.index.get_indexer([ts], method='nearest')[0]
-        if nearest < 0 or nearest >= len(df):
-            return
-        day = df.index[nearest]
-        price = df['Close'].iloc[nearest]
-
-        self._clear_crosshair()
-
-        # 垂直線（貫穿所有子圖）
-        for a in (self.ax, self.ax_vol, self.ax_kd):
-            pass
-        self._crosshair_vline = self.ax.axvline(x=day, color='#555555', linestyle='-', linewidth=0.7, alpha=0.8)
-        self.ax_vol.axvline(x=day, color='#555555', linestyle='-', linewidth=0.7, alpha=0.8)
-        self.ax_kd.axvline(x=day, color='#555555', linestyle='-', linewidth=0.7, alpha=0.8)
-
-        # 水平線（在K線圖上）
-        self._crosshair_hline = self.ax.axhline(y=event.ydata, color='#555555', linestyle='-', linewidth=0.7, alpha=0.8)
-
-        # 右側價格標籤
-        xlim = self.ax.get_xlim()
-        self._crosshair_price_label = self.ax.text(
-            xlim[1], event.ydata, f' {price:.2f} ',
-            fontsize=9, color='white', fontweight='bold',
-            ha='left', va='center',
-            bbox=dict(boxstyle='round,pad=0.2', facecolor='#333333', edgecolor='#555555'),
-            clip_on=False, zorder=10)
-
-        # 延遲重繪
-        if getattr(self, '_hover_timer', None):
-            self.root.after_cancel(self._hover_timer)
-        self._hover_timer = self.root.after(20, self._do_hover_redraw)
-
-    def _do_hover_redraw(self):
-        self._hover_timer = None
-        self.canvas.draw_idle()
 
     def _draw_prediction(self, df, close, pred_days):
         """根據選定方法預測未來走勢"""
+        # 延伸日期索引以涵蓋預測天數
+        last_date = df.index[-1]
+        future_dates = pd.bdate_range(start=last_date + pd.Timedelta(days=1), periods=pred_days)
+        self._date_index = df.index.append(future_dates)
+
+        # 重新設定X軸刻度（含未來日期）
+        n_total = len(self._date_index)
+        if pred_days <= 30:
+            step = 1
+        elif pred_days <= 90:
+            step = 5
+        else:
+            step = 20
+        def _fmt_date(x, pos):
+            idx = int(round(x))
+            if 0 <= idx < n_total:
+                return self._date_index[idx].strftime('%Y/%m')
+            return ''
+        loc = plt.MultipleLocator(step)
+        for a in (self.ax, self.ax_vol, self.ax_kd):
+            a.xaxis.set_major_locator(loc)
+            a.xaxis.set_major_formatter(plt.FuncFormatter(_fmt_date))
+
         method = self.pred_method.get()
         if method == "全部":
             self._pred_all(df, close, pred_days)
+        elif method == "AI預測":
+            self._pred_ai(df, close, pred_days)
+        elif method == "XGBoost":
+            self._pred_xgboost(df, close, pred_days)
+        elif method == "隨機森林":
+            self._pred_rf(df, close, pred_days)
+        elif method == "LightGBM":
+            self._pred_lgb(df, close, pred_days)
+        elif method == "CatBoost":
+            self._pred_cb(df, close, pred_days)
+        elif method == "GBoost":
+            self._pred_gb(df, close, pred_days)
+        elif method == "ExtraTree":
+            self._pred_et(df, close, pred_days)
+        elif method == "Stacking":
+            self._pred_stacking(df, close, pred_days)
         elif method == "線性":
             self._pred_linear(df, close, pred_days)
         elif method == "多項式":
@@ -716,8 +707,6 @@ class StockApp:
         n = len(close)
         x = np.arange(n)
         y = close.values.astype(float)
-        last_date = df.index[-1]
-        future_dates = pd.bdate_range(start=last_date + pd.Timedelta(days=1), periods=pred_days)
         future_x = np.arange(n, n + pred_days)
         legend_handles = []
 
@@ -726,8 +715,8 @@ class StockApp:
         trend1 = np.polyval(coeffs1, x)
         pred1 = np.polyval(coeffs1, future_x)
         std1 = np.std(y - trend1)
-        self.ax.plot(future_dates, pred1, color='#888888', linewidth=1.2, linestyle='--', alpha=0.8)
-        self.ax.fill_between(future_dates, pred1 - std1, pred1 + std1, alpha=0.04, color='#888888')
+        self.ax.plot(future_x, pred1, color='#888888', linewidth=1.2, linestyle='--', alpha=0.8)
+        self.ax.fill_between(future_x, pred1 - std1, pred1 + std1, alpha=0.04, color='#888888')
         legend_handles.append(Line2D([0], [0], color='#888888', linestyle='--', linewidth=1.2,
                                      label=f'線性 {pred1[-1]:.2f}'))
 
@@ -736,8 +725,8 @@ class StockApp:
         c3 = np.polyfit(x, y, 3)
         pred2 = (np.polyval(c2, future_x) + np.polyval(c3, future_x)) / 2
         std2 = np.std(y - np.polyval(c2, x))
-        self.ax.plot(future_dates, pred2, color='#ff9800', linewidth=1.2, linestyle='--', alpha=0.8)
-        self.ax.fill_between(future_dates, pred2 - std2, pred2 + std2, alpha=0.04, color='#ff9800')
+        self.ax.plot(future_x, pred2, color='#ff9800', linewidth=1.2, linestyle='--', alpha=0.8)
+        self.ax.fill_between(future_x, pred2 - std2, pred2 + std2, alpha=0.04, color='#ff9800')
         legend_handles.append(Line2D([0], [0], color='#ff9800', linestyle='--', linewidth=1.2,
                                      label=f'多項式 {pred2[-1]:.2f}'))
 
@@ -753,11 +742,11 @@ class StockApp:
             sims[i, :] = prices[1:]
         mc_mean = np.mean(sims, axis=0)
         for i in range(0, 200, 10):
-            self.ax.plot(future_dates, sims[i], color='#bb86fc', linewidth=0.2, alpha=0.1)
-        self.ax.plot(future_dates, mc_mean, color='#bb86fc', linewidth=1.5, linestyle='-')
+            self.ax.plot(future_x, sims[i], color='#bb86fc', linewidth=0.2, alpha=0.1)
+        self.ax.plot(future_x, mc_mean, color='#bb86fc', linewidth=1.5, linestyle='-')
         mc_p5 = np.percentile(sims, 5, axis=0)
         mc_p95 = np.percentile(sims, 95, axis=0)
-        self.ax.fill_between(future_dates, mc_p5, mc_p95, alpha=0.06, color='#bb86fc')
+        self.ax.fill_between(future_x, mc_p5, mc_p95, alpha=0.06, color='#bb86fc')
         up_prob = np.mean(sims[:, -1] > S0) * 100
         legend_handles.append(Line2D([0], [0], color='#bb86fc', linewidth=1.5,
                                      label=f'MC均值 {mc_mean[-1]:.2f}'))
@@ -772,7 +761,7 @@ class StockApp:
             level.append(new_level)
             trend_v.append(new_trend)
         pred4 = [level[-1] + (i + 1) * trend_v[-1] for i in range(pred_days)]
-        self.ax.plot(future_dates, pred4, color='#00bcd4', linewidth=1.2, linestyle='--', alpha=0.8)
+        self.ax.plot(future_x, pred4, color='#00bcd4', linewidth=1.2, linestyle='--', alpha=0.8)
         legend_handles.append(Line2D([0], [0], color='#00bcd4', linestyle='--', linewidth=1.2,
                                      label=f'指數平滑 {pred4[-1]:.2f}'))
 
@@ -786,7 +775,7 @@ class StockApp:
             slope = latest_diff / max(len(ma5), 1)
         pred5 = [S0 + slope * (i + 1) for i in range(pred_days)]
         color5 = '#22c55e' if latest_diff > 0 else '#f44336'
-        self.ax.plot(future_dates, pred5, color=color5, linewidth=1.2, linestyle='--', alpha=0.8)
+        self.ax.plot(future_x, pred5, color=color5, linewidth=1.2, linestyle='--', alpha=0.8)
         direction = "多" if latest_diff > 0 else "空"
         legend_handles.append(Line2D([0], [0], color=color5, linestyle='--', linewidth=1.2,
                                      label=f'MA交叉({direction}) {pred5[-1]:.2f}'))
@@ -799,17 +788,73 @@ class StockApp:
         for i in range(1, pred_days + 1):
             decay = 0.95 ** i
             pred6.append(current_ma + (S0 - current_ma) * decay)
-        self.ax.plot(future_dates, pred6, color='#e040fb', linewidth=1.2, linestyle='--', alpha=0.8)
+        self.ax.plot(future_x, pred6, color='#e040fb', linewidth=1.2, linestyle='--', alpha=0.8)
         legend_handles.append(Line2D([0], [0], color='#e040fb', linestyle='--', linewidth=1.2,
                                      label=f'布林 {pred6[-1]:.2f}'))
 
-        self.ax.axvspan(df.index[-1], future_dates[-1], alpha=0.03, color='#bb86fc')
+        # 7. XGBoost（紅色）
+        xgb_pred, _ = self._calc_ai_prediction(df, pred_days)
+        if xgb_pred is not None:
+            xgb_future = np.arange(n, n + len(xgb_pred))
+            self.ax.plot(xgb_future, xgb_pred, color='#ff6b6b', linewidth=1.5, linestyle='--', alpha=0.9)
+            legend_handles.append(Line2D([0], [0], color='#ff6b6b', linestyle='--', linewidth=1.5,
+                                         label=f'XGBoost {xgb_pred[-1]:.2f}'))
+
+        # 8. 隨機森林（淺藍色）
+        rf_pred, _ = self._calc_rf_prediction(df, pred_days)
+        if rf_pred is not None:
+            rf_future = np.arange(n, n + len(rf_pred))
+            self.ax.plot(rf_future, rf_pred, color='#4fc3f7', linewidth=1.5, linestyle='--', alpha=0.9)
+            legend_handles.append(Line2D([0], [0], color='#4fc3f7', linestyle='--', linewidth=1.5,
+                                         label=f'隨機森林 {rf_pred[-1]:.2f}'))
+
+        # 9. LightGBM（金色）
+        lgb_pred, _ = self._calc_lgb_prediction(df, pred_days)
+        if lgb_pred is not None:
+            lgb_future = np.arange(n, n + len(lgb_pred))
+            self.ax.plot(lgb_future, lgb_pred, color='#ffd700', linewidth=1.5, linestyle='--', alpha=0.9)
+            legend_handles.append(Line2D([0], [0], color='#ffd700', linestyle='--', linewidth=1.5,
+                                         label=f'LightGBM {lgb_pred[-1]:.2f}'))
+
+        # 10. CatBoost（粉紅）
+        cb_pred, _ = self._calc_cb_prediction(df, pred_days)
+        if cb_pred is not None:
+            cb_future = np.arange(n, n + len(cb_pred))
+            self.ax.plot(cb_future, cb_pred, color='#ff69b4', linewidth=1.5, linestyle='--', alpha=0.9)
+            legend_handles.append(Line2D([0], [0], color='#ff69b4', linestyle='--', linewidth=1.5,
+                                         label=f'CatBoost {cb_pred[-1]:.2f}'))
+
+        # 11. Gradient Boosting（青色）
+        gb_pred, _ = self._calc_gb_prediction(df, pred_days)
+        if gb_pred is not None:
+            gb_future = np.arange(n, n + len(gb_pred))
+            self.ax.plot(gb_future, gb_pred, color='#00ffff', linewidth=1.5, linestyle='--', alpha=0.9)
+            legend_handles.append(Line2D([0], [0], color='#00ffff', linestyle='--', linewidth=1.5,
+                                         label=f'GBoost {gb_pred[-1]:.2f}'))
+
+        # 12. Extra Trees（萊姆綠）
+        et_pred, _ = self._calc_et_prediction(df, pred_days)
+        if et_pred is not None:
+            et_future = np.arange(n, n + len(et_pred))
+            self.ax.plot(et_future, et_pred, color='#32cd32', linewidth=1.5, linestyle='--', alpha=0.9)
+            legend_handles.append(Line2D([0], [0], color='#32cd32', linestyle='--', linewidth=1.5,
+                                         label=f'ExtraTree {et_pred[-1]:.2f}'))
+
+        # 13. Stacking Ensemble（橘紅）
+        st_pred, _ = self._calc_stacking_prediction(df, pred_days)
+        if st_pred is not None:
+            st_future = np.arange(n, n + len(st_pred))
+            self.ax.plot(st_future, st_pred, color='#ff4500', linewidth=1.5, linestyle='--', alpha=0.9)
+            legend_handles.append(Line2D([0], [0], color='#ff4500', linestyle='--', linewidth=1.5,
+                                         label=f'Stacking {st_pred[-1]:.2f}'))
+
+        self.ax.axvspan(n - 1, n - 1 + pred_days, alpha=0.03, color='#bb86fc')
 
         # 機率文字
         self.ax.text(0.02, 0.82,
                      f'MC 上漲 {up_prob:.1f}% / 下跌 {100-up_prob:.1f}%　MA5/MA10 {direction}頭',
                      transform=self.ax.transAxes, fontsize=8, color='#e0e0e0',
-                     fontfamily='Microsoft JhengHei', verticalalignment='top',
+                     fontfamily=_CHINESE_FONT, verticalalignment='top',
                      bbox=dict(boxstyle='round,pad=0.3', facecolor='#1a1a2e', edgecolor='#555555'))
 
         self.ax.legend(handles=legend_handles, fontsize=7, loc='lower right',
@@ -822,22 +867,20 @@ class StockApp:
         y = close.values.astype(float)
         coeffs = np.polyfit(x, y, 1)
         trend = np.polyval(coeffs, x)
-        last_date = df.index[-1]
-        future_dates = pd.bdate_range(start=last_date + pd.Timedelta(days=1), periods=pred_days)
         future_x = np.arange(n, n + pred_days)
         pred = np.polyval(coeffs, future_x)
         std_r = np.std(y - trend)
 
-        self.ax.plot(df.index, trend, color='#888888', linewidth=1, linestyle=':', alpha=0.5)
-        self.ax.plot(future_dates, pred, color='#888888', linewidth=2, linestyle='--')
-        self.ax.fill_between(future_dates, pred - std_r, pred + std_r, alpha=0.12, color='#888888')
-        self.ax.fill_between(future_dates, pred - 2*std_r, pred + 2*std_r, alpha=0.05, color='#888888')
-        self.ax.scatter(future_dates[-1], pred[-1], color='#888888', s=50, zorder=5,
+        self.ax.plot(self._x_pos, trend, color='#888888', linewidth=1, linestyle=':', alpha=0.5)
+        self.ax.plot(future_x, pred, color='#888888', linewidth=2, linestyle='--')
+        self.ax.fill_between(future_x, pred - std_r, pred + std_r, alpha=0.12, color='#888888')
+        self.ax.fill_between(future_x, pred - 2*std_r, pred + 2*std_r, alpha=0.05, color='#888888')
+        self.ax.scatter(future_x[-1], pred[-1], color='#888888', s=50, zorder=5,
                         edgecolors='white', linewidth=0.5)
-        self.ax.annotate(f'  預測 {pred[-1]:.2f}', xy=(future_dates[-1], pred[-1]),
+        self.ax.annotate(f'  預測 {pred[-1]:.2f}', xy=(future_x[-1], pred[-1]),
                          xytext=(0, 15), textcoords='offset points',
-                         fontsize=9, color='#888888', fontweight='bold', fontfamily='Microsoft JhengHei')
-        self.ax.axvspan(df.index[-1], future_dates[-1], alpha=0.04, color='#888888')
+                         fontsize=9, color='#888888', fontweight='bold', fontfamily=_CHINESE_FONT)
+        self.ax.axvspan(n - 1, n - 1 + pred_days, alpha=0.04, color='#888888')
         from matplotlib.lines import Line2D
         self.ax.legend(handles=[
             Line2D([0], [0], color='#888888', linestyle='--', linewidth=2, label=f'線性預測 {pred[-1]:.2f}'),
@@ -848,8 +891,6 @@ class StockApp:
         n = len(close)
         x = np.arange(n)
         y = close.values.astype(float)
-        last_date = df.index[-1]
-        future_dates = pd.bdate_range(start=last_date + pd.Timedelta(days=1), periods=pred_days)
         future_x = np.arange(n, n + pred_days)
         c2 = np.polyfit(x, y, 2)
         c3 = np.polyfit(x, y, 3)
@@ -857,16 +898,16 @@ class StockApp:
         pred = (np.polyval(c2, future_x) + np.polyval(c3, future_x)) / 2
         std_r = np.std(y - trend)
 
-        self.ax.plot(df.index, trend, color='#ff9800', linewidth=1, linestyle=':', alpha=0.5)
-        self.ax.plot(future_dates, pred, color='#ff9800', linewidth=2, linestyle='--')
-        self.ax.fill_between(future_dates, pred - std_r, pred + std_r, alpha=0.12, color='#ff9800')
-        self.ax.fill_between(future_dates, pred - 2*std_r, pred + 2*std_r, alpha=0.05, color='#ff9800')
-        self.ax.scatter(future_dates[-1], pred[-1], color='#ff9800', s=50, zorder=5,
+        self.ax.plot(self._x_pos, trend, color='#ff9800', linewidth=1, linestyle=':', alpha=0.5)
+        self.ax.plot(future_x, pred, color='#ff9800', linewidth=2, linestyle='--')
+        self.ax.fill_between(future_x, pred - std_r, pred + std_r, alpha=0.12, color='#ff9800')
+        self.ax.fill_between(future_x, pred - 2*std_r, pred + 2*std_r, alpha=0.05, color='#ff9800')
+        self.ax.scatter(future_x[-1], pred[-1], color='#ff9800', s=50, zorder=5,
                         edgecolors='white', linewidth=0.5)
-        self.ax.annotate(f'  預測 {pred[-1]:.2f}', xy=(future_dates[-1], pred[-1]),
+        self.ax.annotate(f'  預測 {pred[-1]:.2f}', xy=(future_x[-1], pred[-1]),
                          xytext=(0, 15), textcoords='offset points',
-                         fontsize=9, color='#ff9800', fontweight='bold', fontfamily='Microsoft JhengHei')
-        self.ax.axvspan(df.index[-1], future_dates[-1], alpha=0.04, color='#ff9800')
+                         fontsize=9, color='#ff9800', fontweight='bold', fontfamily=_CHINESE_FONT)
+        self.ax.axvspan(n - 1, n - 1 + pred_days, alpha=0.04, color='#ff9800')
         from matplotlib.lines import Line2D
         self.ax.legend(handles=[
             Line2D([0], [0], color='#ff9800', linestyle='--', linewidth=2, label=f'多項式預測 {pred[-1]:.2f}'),
@@ -875,8 +916,8 @@ class StockApp:
     def _pred_monte_carlo(self, df, close, pred_days):
         """蒙地卡羅模擬 (GBM, 200 paths)"""
         y = close.values.astype(float)
-        last_date = df.index[-1]
-        future_dates = pd.bdate_range(start=last_date + pd.Timedelta(days=1), periods=pred_days)
+        n = len(y)
+        future_x = np.arange(n, n + pred_days)
         returns = np.diff(y) / y[:-1]
         mu, sigma = np.mean(returns), np.std(returns)
         S0 = y[-1]
@@ -893,28 +934,28 @@ class StockApp:
         mc_p95 = np.percentile(sims, 95, axis=0)
 
         for i in range(0, 200, 5):
-            self.ax.plot(future_dates, sims[i], color='#bb86fc', linewidth=0.3, alpha=0.15)
-        self.ax.plot(future_dates, mc_mean, color='#bb86fc', linewidth=2, linestyle='-')
-        self.ax.fill_between(future_dates, mc_p25, mc_p75, alpha=0.2, color='#bb86fc')
-        self.ax.fill_between(future_dates, mc_p5, mc_p95, alpha=0.08, color='#bb86fc')
-        self.ax.scatter(future_dates[-1], mc_mean[-1], color='#bb86fc', s=50, zorder=5,
+            self.ax.plot(future_x, sims[i], color='#bb86fc', linewidth=0.3, alpha=0.15)
+        self.ax.plot(future_x, mc_mean, color='#bb86fc', linewidth=2, linestyle='-')
+        self.ax.fill_between(future_x, mc_p25, mc_p75, alpha=0.2, color='#bb86fc')
+        self.ax.fill_between(future_x, mc_p5, mc_p95, alpha=0.08, color='#bb86fc')
+        self.ax.scatter(future_x[-1], mc_mean[-1], color='#bb86fc', s=50, zorder=5,
                         edgecolors='white', linewidth=0.5)
-        self.ax.annotate(f'  均值 {mc_mean[-1]:.2f}', xy=(future_dates[-1], mc_mean[-1]),
+        self.ax.annotate(f'  均值 {mc_mean[-1]:.2f}', xy=(future_x[-1], mc_mean[-1]),
                          xytext=(0, 15), textcoords='offset points',
-                         fontsize=9, color='#bb86fc', fontweight='bold', fontfamily='Microsoft JhengHei')
-        self.ax.annotate(f'{mc_p95[-1]:.2f}', xy=(future_dates[-1], mc_p95[-1]),
+                         fontsize=9, color='#bb86fc', fontweight='bold', fontfamily=_CHINESE_FONT)
+        self.ax.annotate(f'{mc_p95[-1]:.2f}', xy=(future_x[-1], mc_p95[-1]),
                          xytext=(0, 5), textcoords='offset points',
-                         fontsize=7, color='#888888', fontfamily='Microsoft JhengHei')
-        self.ax.annotate(f'{mc_p5[-1]:.2f}', xy=(future_dates[-1], mc_p5[-1]),
+                         fontsize=7, color='#888888', fontfamily=_CHINESE_FONT)
+        self.ax.annotate(f'{mc_p5[-1]:.2f}', xy=(future_x[-1], mc_p5[-1]),
                          xytext=(0, -10), textcoords='offset points',
-                         fontsize=7, color='#888888', fontfamily='Microsoft JhengHei')
+                         fontsize=7, color='#888888', fontfamily=_CHINESE_FONT)
         up_prob = np.mean(sims[:, -1] > S0) * 100
         self.ax.text(0.02, 0.82,
                      f'上漲機率 {up_prob:.1f}%　下跌機率 {100-up_prob:.1f}%',
                      transform=self.ax.transAxes, fontsize=9, color='#e0e0e0',
-                     fontfamily='Microsoft JhengHei', verticalalignment='top',
+                     fontfamily=_CHINESE_FONT, verticalalignment='top',
                      bbox=dict(boxstyle='round,pad=0.3', facecolor='#1a1a2e', edgecolor='#555555'))
-        self.ax.axvspan(df.index[-1], future_dates[-1], alpha=0.04, color='#bb86fc')
+        self.ax.axvspan(n - 1, n - 1 + pred_days, alpha=0.04, color='#bb86fc')
         from matplotlib.lines import Line2D
         self.ax.legend(handles=[
             Line2D([0], [0], color='#bb86fc', linewidth=2, label=f'MC均值 {mc_mean[-1]:.2f}'),
@@ -925,9 +966,8 @@ class StockApp:
     def _pred_exp_smoothing(self, df, close, pred_days):
         """Holt-Winters 指數平滑法（趨勢 + 季節性）"""
         y = close.values.astype(float)
-        last_date = df.index[-1]
-        future_dates = pd.bdate_range(start=last_date + pd.Timedelta(days=1), periods=pred_days)
         n = len(y)
+        future_x = np.arange(n, n + pred_days)
 
         # 手動實作雙指數平滑 (Holt's linear)
         alpha, beta = 0.3, 0.1
@@ -941,7 +981,7 @@ class StockApp:
 
         # 歷史擬合
         fitted = [level[i] + trend_val[i] for i in range(n)]
-        self.ax.plot(df.index, fitted, color='#00bcd4', linewidth=1, linestyle=':', alpha=0.5)
+        self.ax.plot(self._x_pos, fitted, color='#00bcd4', linewidth=1, linestyle=':', alpha=0.5)
 
         # 未來預測
         last_level = level[-1]
@@ -953,17 +993,17 @@ class StockApp:
         std_r = np.std(residuals)
         expanding_std = np.array([std_r * np.sqrt(i + 1) for i in range(pred_days)])
 
-        self.ax.plot(future_dates, pred, color='#00bcd4', linewidth=2, linestyle='--')
-        self.ax.fill_between(future_dates, pred - expanding_std, pred + expanding_std,
+        self.ax.plot(future_x, pred, color='#00bcd4', linewidth=2, linestyle='--')
+        self.ax.fill_between(future_x, pred - expanding_std, pred + expanding_std,
                              alpha=0.12, color='#00bcd4')
-        self.ax.fill_between(future_dates, pred - 2*expanding_std, pred + 2*expanding_std,
+        self.ax.fill_between(future_x, pred - 2*expanding_std, pred + 2*expanding_std,
                              alpha=0.05, color='#00bcd4')
-        self.ax.scatter(future_dates[-1], pred[-1], color='#00bcd4', s=50, zorder=5,
+        self.ax.scatter(future_x[-1], pred[-1], color='#00bcd4', s=50, zorder=5,
                         edgecolors='white', linewidth=0.5)
-        self.ax.annotate(f'  預測 {pred[-1]:.2f}', xy=(future_dates[-1], pred[-1]),
+        self.ax.annotate(f'  預測 {pred[-1]:.2f}', xy=(future_x[-1], pred[-1]),
                          xytext=(0, 15), textcoords='offset points',
-                         fontsize=9, color='#00bcd4', fontweight='bold', fontfamily='Microsoft JhengHei')
-        self.ax.axvspan(df.index[-1], future_dates[-1], alpha=0.04, color='#00bcd4')
+                         fontsize=9, color='#00bcd4', fontweight='bold', fontfamily=_CHINESE_FONT)
+        self.ax.axvspan(n - 1, n - 1 + pred_days, alpha=0.04, color='#00bcd4')
         from matplotlib.lines import Line2D
         self.ax.legend(handles=[
             Line2D([0], [0], color='#00bcd4', linestyle='--', linewidth=2, label=f'指數平滑 {pred[-1]:.2f}'),
@@ -973,8 +1013,7 @@ class StockApp:
         """MA交叉預測法：以近期MA5/MA10交叉趨勢外推"""
         y = close.values.astype(float)
         n = len(y)
-        last_date = df.index[-1]
-        future_dates = pd.bdate_range(start=last_date + pd.Timedelta(days=1), periods=pred_days)
+        future_x = np.arange(n, n + pred_days)
 
         # 計算 MA5 和 MA10
         ma5 = np.convolve(y, np.ones(5)/5, mode='valid')
@@ -984,8 +1023,8 @@ class StockApp:
         ma10_x = np.arange(n - len(ma10), n)
 
         # 歷史MA線
-        self.ax.plot(df.index[ma5_x], ma5, color='#22c55e', linewidth=1, linestyle=':', alpha=0.6)
-        self.ax.plot(df.index[ma10_x], ma10, color='#f44336', linewidth=1, linestyle=':', alpha=0.6)
+        self.ax.plot(self._x_pos[ma5_x], ma5, color='#22c55e', linewidth=1, linestyle=':', alpha=0.6)
+        self.ax.plot(self._x_pos[ma10_x], ma10, color='#f44336', linewidth=1, linestyle=':', alpha=0.6)
 
         # 交叉判斷：MA5在MA10上方=多頭，下方=空頭
         latest_diff = ma5[-1] - ma10[-1]
@@ -1008,22 +1047,22 @@ class StockApp:
         direction = "多頭" if latest_diff > 0 else "空頭"
         color = '#22c55e' if latest_diff > 0 else '#f44336'
 
-        self.ax.plot(future_dates, pred, color=color, linewidth=2, linestyle='--')
-        self.ax.fill_between(future_dates, pred - expanding_vol, pred + expanding_vol,
+        self.ax.plot(future_x, pred, color=color, linewidth=2, linestyle='--')
+        self.ax.fill_between(future_x, pred - expanding_vol, pred + expanding_vol,
                              alpha=0.1, color=color)
-        self.ax.fill_between(future_dates, pred - 2*expanding_vol, pred + 2*expanding_vol,
+        self.ax.fill_between(future_x, pred - 2*expanding_vol, pred + 2*expanding_vol,
                              alpha=0.04, color=color)
-        self.ax.scatter(future_dates[-1], pred[-1], color=color, s=50, zorder=5,
+        self.ax.scatter(future_x[-1], pred[-1], color=color, s=50, zorder=5,
                         edgecolors='white', linewidth=0.5)
-        self.ax.annotate(f'  預測 {pred[-1]:.2f}', xy=(future_dates[-1], pred[-1]),
+        self.ax.annotate(f'  預測 {pred[-1]:.2f}', xy=(future_x[-1], pred[-1]),
                          xytext=(0, 15), textcoords='offset points',
-                         fontsize=9, color=color, fontweight='bold', fontfamily='Microsoft JhengHei')
+                         fontsize=9, color=color, fontweight='bold', fontfamily=_CHINESE_FONT)
         self.ax.text(0.02, 0.82,
                      f'MA5/MA10 {direction}　MA5={ma5[-1]:.2f} MA10={ma10[-1]:.2f}',
                      transform=self.ax.transAxes, fontsize=9, color='#e0e0e0',
-                     fontfamily='Microsoft JhengHei', verticalalignment='top',
+                     fontfamily=_CHINESE_FONT, verticalalignment='top',
                      bbox=dict(boxstyle='round,pad=0.3', facecolor='#1a1a2e', edgecolor='#555555'))
-        self.ax.axvspan(df.index[-1], future_dates[-1], alpha=0.04, color=color)
+        self.ax.axvspan(n - 1, n - 1 + pred_days, alpha=0.04, color=color)
         from matplotlib.lines import Line2D
         self.ax.legend(handles=[
             Line2D([0], [0], color='#22c55e', linestyle=':', linewidth=1, label='MA5'),
@@ -1035,8 +1074,7 @@ class StockApp:
         """布林通道預測法：以均值回歸為基礎外推"""
         y = close.values.astype(float)
         n = len(y)
-        last_date = df.index[-1]
-        future_dates = pd.bdate_range(start=last_date + pd.Timedelta(days=1), periods=pred_days)
+        future_x = np.arange(n, n + pred_days)
 
         # 20日布林通道
         ma20 = np.convolve(y, np.ones(20)/20, mode='valid')
@@ -1044,7 +1082,7 @@ class StockApp:
         # 歷史布林帶
         hist_upper = ma20 + 2 * np.std(y[-len(ma20):])
         hist_lower = ma20 - 2 * np.std(y[-len(ma20):])
-        self.ax.plot(df.index[offset:], ma20, color='#e040fb', linewidth=1, linestyle=':', alpha=0.5)
+        self.ax.plot(self._x_pos[offset:], ma20, color='#e040fb', linewidth=1, linestyle=':', alpha=0.5)
 
         # 最新布林通道參數
         current_ma = ma20[-1]
@@ -1065,25 +1103,428 @@ class StockApp:
         upper_pred = [p + expanding_std[i] for i, p in enumerate(pred)]
         lower_pred = [p - expanding_std[i] for i, p in enumerate(pred)]
 
-        self.ax.plot(future_dates, upper_pred, color='#e040fb', linewidth=0.8, linestyle=':', alpha=0.4)
-        self.ax.plot(future_dates, lower_pred, color='#e040fb', linewidth=0.8, linestyle=':', alpha=0.4)
-        self.ax.fill_between(future_dates, lower_pred, upper_pred, alpha=0.1, color='#e040fb')
-        self.ax.plot(future_dates, pred, color='#e040fb', linewidth=2, linestyle='--')
-        self.ax.scatter(future_dates[-1], pred[-1], color='#e040fb', s=50, zorder=5,
+        self.ax.plot(future_x, upper_pred, color='#e040fb', linewidth=0.8, linestyle=':', alpha=0.4)
+        self.ax.plot(future_x, lower_pred, color='#e040fb', linewidth=0.8, linestyle=':', alpha=0.4)
+        self.ax.fill_between(future_x, lower_pred, upper_pred, alpha=0.1, color='#e040fb')
+        self.ax.plot(future_x, pred, color='#e040fb', linewidth=2, linestyle='--')
+        self.ax.scatter(future_x[-1], pred[-1], color='#e040fb', s=50, zorder=5,
                         edgecolors='white', linewidth=0.5)
-        self.ax.annotate(f'  預測 {pred[-1]:.2f}', xy=(future_dates[-1], pred[-1]),
+        self.ax.annotate(f'  預測 {pred[-1]:.2f}', xy=(future_x[-1], pred[-1]),
                          xytext=(0, 15), textcoords='offset points',
-                         fontsize=9, color='#e040fb', fontweight='bold', fontfamily='Microsoft JhengHei')
+                         fontsize=9, color='#e040fb', fontweight='bold', fontfamily=_CHINESE_FONT)
         self.ax.text(0.02, 0.82,
                      f'布林通道　上軌 {upper_band:.2f}　MA20 {current_ma:.2f}　下軌 {lower_band:.2f}',
                      transform=self.ax.transAxes, fontsize=9, color='#e0e0e0',
-                     fontfamily='Microsoft JhengHei', verticalalignment='top',
+                     fontfamily=_CHINESE_FONT, verticalalignment='top',
                      bbox=dict(boxstyle='round,pad=0.3', facecolor='#1a1a2e', edgecolor='#555555'))
-        self.ax.axvspan(df.index[-1], future_dates[-1], alpha=0.04, color='#e040fb')
+        self.ax.axvspan(n - 1, n - 1 + pred_days, alpha=0.04, color='#e040fb')
         from matplotlib.lines import Line2D
         self.ax.legend(handles=[
             Line2D([0], [0], color='#e040fb', linestyle=':', linewidth=1, label='MA20'),
             Line2D([0], [0], color='#e040fb', linestyle='--', linewidth=2, label=f'布林預測 {pred[-1]:.2f}'),
+        ], fontsize=8, loc='upper right', facecolor='#0d1117', edgecolor='#555555', labelcolor='#e0e0e0')
+
+    # ── 專業技術指標特徵工程 ──
+
+    def _tech_features(self, df):
+        """建立專業技術指標特徵（RSI, MACD, Bollinger %B, 均線, 量價關係等）"""
+        close = df['Close'].values.astype(float)
+        volume = df['Volume'].values.astype(float)
+        high = df['High'].values.astype(float)
+        low = df['Low'].values.astype(float)
+        n = len(close)
+
+        features = {}
+        # 滯後價格
+        for lag in (1, 2, 3, 5, 10, 20):
+            features[f'lag_{lag}'] = np.pad(close[:-lag] if lag < n else [],
+                                            (lag, 0), constant_values=np.nan)[:n]
+
+        # 日報酬率
+        ret = np.diff(close) / close[:-1]
+        features['return_1'] = np.pad(ret, (1, 0), constant_values=np.nan)
+        features['return_5'] = np.pad(np.convolve(ret, np.ones(5)/5, mode='valid'),
+                                      (5, 0), constant_values=np.nan)[:n]
+
+        # 均線
+        for ma_len in (5, 10, 20, 60):
+            ma = np.convolve(close, np.ones(ma_len)/ma_len, mode='valid')
+            features[f'ma_{ma_len}'] = np.pad(ma, (ma_len - 1, 0), constant_values=np.nan)[:n]
+            # 價格與均線距離
+            features[f'ma_{ma_len}_dist'] = (close - features[f'ma_{ma_len}']) / features[f'ma_{ma_len}']
+
+        # RSI (14 日)
+        gain = np.where(ret > 0, ret, 0)
+        loss = np.where(ret < 0, -ret, 0)
+        avg_gain = np.pad(np.convolve(gain, np.ones(14)/14, mode='valid'),
+                          (14, 0), constant_values=np.nan)[:n]
+        avg_loss = np.pad(np.convolve(loss, np.ones(14)/14, mode='valid'),
+                          (14, 0), constant_values=np.nan)[:n]
+        rs = avg_gain / np.where(avg_loss == 0, 1e-10, avg_loss)
+        features['rsi'] = 100 - (100 / (1 + rs))
+
+        # MACD (12, 26, 9)
+        ema12 = close.copy().astype(float)
+        ema26 = close.copy().astype(float)
+        for i in range(1, n):
+            ema12[i] = ema12[i-1] + (2/13) * (close[i] - ema12[i-1])
+            ema26[i] = ema26[i-1] + (2/27) * (close[i] - ema26[i-1])
+        macd = ema12 - ema26
+        signal = macd.copy()
+        for i in range(1, n):
+            signal[i] = signal[i-1] + (2/10) * (macd[i] - signal[i-1])
+        features['macd'] = macd
+        features['macd_signal'] = signal
+        features['macd_hist'] = macd - signal
+
+        # Bollinger %B (20, 2)
+        ma20 = features['ma_20'].copy()
+        rolling_std = np.array([np.std(close[max(0, i-19):i+1]) for i in range(n)])
+        upper = ma20 + 2 * rolling_std
+        lower = ma20 - 2 * rolling_std
+        features['bb_upper'] = upper
+        features['bb_lower'] = lower
+        features['bb_width'] = (upper - lower) / ma20
+        features['bb_pct_b'] = np.where(upper != lower, (close - lower) / (upper - lower), 0.5)
+
+        # 成交量特徵
+        vol_ma5 = np.convolve(volume, np.ones(5)/5, mode='valid')
+        features['vol_ma5'] = np.pad(vol_ma5, (4, 0), constant_values=np.nan)[:n]
+        features['vol_ratio'] = volume / np.where(features['vol_ma5'] == 0, 1, features['vol_ma5'])
+
+        # 波動率 (ATR-like)
+        tr = np.maximum(high - low, np.abs(high - np.pad(close[:-1], (1, 0), constant_values=np.nan)))
+        features['atr'] = np.pad(np.convolve(tr, np.ones(14)/14, mode='valid'),
+                                 (14, 0), constant_values=np.nan)[:n]
+
+        return pd.DataFrame(features, index=df.index)
+
+    # ── 專業 AI 預測核心（XGBoost + 技術指標） ──
+
+    def _calc_ai_prediction(self, df, pred_days):
+        """使用 XGBoost 搭配技術指標進行專業多步預測，回傳 (預測陣列, 模型名稱) 或 (None, None)"""
+        from xgboost import XGBRegressor
+        from sklearn.preprocessing import StandardScaler
+        close = df['Close'].values.astype(float)
+        n = len(close)
+        if n < 30:
+            return None, None
+        tech = self._tech_features(df)
+        feature_cols = [c for c in tech.columns if c != 'bb_upper' and c != 'bb_lower']
+        # 對齊 target：預測隔日收盤價
+        X_all = tech[feature_cols].values
+        y_all = close.copy()
+        # 去除 NaN
+        mask = ~np.isnan(X_all).any(axis=1)
+        X_clean, y_clean = X_all[mask], y_all[mask]
+        if len(X_clean) < 20:
+            return None, None
+        # 切分訓練/測試
+        split = max(int(len(X_clean) * 0.85), len(X_clean) - 10)
+        scaler = StandardScaler()
+        X_scaled = scaler.fit_transform(X_clean)
+        model = XGBRegressor(n_estimators=200, max_depth=4, learning_rate=0.05,
+                             random_state=42, n_jobs=-1, verbosity=0)
+        model.fit(X_scaled[:split], y_clean[:split])
+        # 遞迴多步預測（使用 raw 特徵空間避免縮放混亂）
+        X_raw = X_clean.copy()
+        last_idx = mask.sum() - 1
+        preds = []
+        try:
+            for step in range(pred_days):
+                feat = X_scaled[last_idx:last_idx+1].copy()
+                p = model.predict(feat)[0]
+                preds.append(p)
+                new_raw = X_raw[-1:].copy()
+                old_lag_1 = X_raw[-1, feature_cols.index('lag_1')]
+                old_lag_2 = X_raw[-1, feature_cols.index('lag_2')]
+                old_lag_3 = X_raw[-1, feature_cols.index('lag_3')]
+                old_lag_5 = X_raw[-1, feature_cols.index('lag_5')]
+                old_lag_10 = X_raw[-1, feature_cols.index('lag_10')]
+                new_raw[0, feature_cols.index('lag_1')] = p
+                new_raw[0, feature_cols.index('lag_2')] = old_lag_1
+                new_raw[0, feature_cols.index('lag_3')] = old_lag_2
+                new_raw[0, feature_cols.index('lag_5')] = old_lag_3
+                new_raw[0, feature_cols.index('lag_10')] = old_lag_5
+                new_raw[0, feature_cols.index('lag_20')] = old_lag_10
+                X_raw = np.vstack([X_raw, new_raw])
+                X_scaled = np.vstack([X_scaled, scaler.transform(new_raw)])
+                last_idx += 1
+        except Exception:
+            return None, None
+        return np.array(preds), 'XGBoost'
+
+    def _calc_rf_prediction(self, df, pred_days, n_estimators=200):
+        """使用隨機森林搭配技術指標進行多步預測"""
+        from sklearn.ensemble import RandomForestRegressor
+        from sklearn.preprocessing import StandardScaler
+        close = df['Close'].values.astype(float)
+        n = len(close)
+        if n < 30:
+            return None, None
+        tech = self._tech_features(df)
+        feature_cols = [c for c in tech.columns if c != 'bb_upper' and c != 'bb_lower']
+        X_all = tech[feature_cols].values
+        y_all = close.copy()
+        mask = ~np.isnan(X_all).any(axis=1)
+        X_clean, y_clean = X_all[mask], y_all[mask]
+        if len(X_clean) < 20:
+            return None, None
+        split = max(int(len(X_clean) * 0.85), len(X_clean) - 10)
+        scaler = StandardScaler()
+        X_scaled = scaler.fit_transform(X_clean)
+        model = RandomForestRegressor(n_estimators=n_estimators, max_depth=6,
+                                      random_state=42, n_jobs=-1)
+        model.fit(X_scaled[:split], y_clean[:split])
+        X_raw = X_clean.copy()
+        last_idx = mask.sum() - 1
+        preds = []
+        try:
+            for step in range(pred_days):
+                feat = X_scaled[last_idx:last_idx+1].copy()
+                p = model.predict(feat)[0]
+                preds.append(p)
+                new_raw = X_raw[-1:].copy()
+                old_lag_1 = X_raw[-1, feature_cols.index('lag_1')]
+                old_lag_2 = X_raw[-1, feature_cols.index('lag_2')]
+                old_lag_3 = X_raw[-1, feature_cols.index('lag_3')]
+                old_lag_5 = X_raw[-1, feature_cols.index('lag_5')]
+                old_lag_10 = X_raw[-1, feature_cols.index('lag_10')]
+                new_raw[0, feature_cols.index('lag_1')] = p
+                new_raw[0, feature_cols.index('lag_2')] = old_lag_1
+                new_raw[0, feature_cols.index('lag_3')] = old_lag_2
+                new_raw[0, feature_cols.index('lag_5')] = old_lag_3
+                new_raw[0, feature_cols.index('lag_10')] = old_lag_5
+                new_raw[0, feature_cols.index('lag_20')] = old_lag_10
+                X_raw = np.vstack([X_raw, new_raw])
+                X_scaled = np.vstack([X_scaled, scaler.transform(new_raw)])
+                last_idx += 1
+        except Exception:
+            return None, None
+        return np.array(preds), 'RF'
+
+    def _calc_model_prediction(self, df, pred_days, model, model_name):
+        """通用 AI 模型多步預測：特徵工程 → 標準化 → 訓練 → 遞迴預測"""
+        from sklearn.preprocessing import StandardScaler
+        close = df['Close'].values.astype(float)
+        n = len(close)
+        if n < 30:
+            return None, None
+        tech = self._tech_features(df)
+        feature_cols = [c for c in tech.columns if c != 'bb_upper' and c != 'bb_lower']
+        X_all = tech[feature_cols].values
+        y_all = close.copy()
+        mask = ~np.isnan(X_all).any(axis=1)
+        X_clean, y_clean = X_all[mask], y_all[mask]
+        if len(X_clean) < 20:
+            return None, None
+        split = max(int(len(X_clean) * 0.85), len(X_clean) - 10)
+        scaler = StandardScaler()
+        X_scaled = scaler.fit_transform(X_clean)
+        model.fit(X_scaled[:split], y_clean[:split])
+        X_raw = X_clean.copy()
+        last_idx = mask.sum() - 1
+        preds = []
+        try:
+            for step in range(pred_days):
+                feat = X_scaled[last_idx:last_idx+1].copy()
+                p = model.predict(feat)[0]
+                preds.append(p)
+                new_raw = X_raw[-1:].copy()
+                old_lag_1 = X_raw[-1, feature_cols.index('lag_1')]
+                old_lag_2 = X_raw[-1, feature_cols.index('lag_2')]
+                old_lag_3 = X_raw[-1, feature_cols.index('lag_3')]
+                old_lag_5 = X_raw[-1, feature_cols.index('lag_5')]
+                old_lag_10 = X_raw[-1, feature_cols.index('lag_10')]
+                new_raw[0, feature_cols.index('lag_1')] = p
+                new_raw[0, feature_cols.index('lag_2')] = old_lag_1
+                new_raw[0, feature_cols.index('lag_3')] = old_lag_2
+                new_raw[0, feature_cols.index('lag_5')] = old_lag_3
+                new_raw[0, feature_cols.index('lag_10')] = old_lag_5
+                new_raw[0, feature_cols.index('lag_20')] = old_lag_10
+                X_raw = np.vstack([X_raw, new_raw])
+                X_scaled = np.vstack([X_scaled, scaler.transform(new_raw)])
+                last_idx += 1
+        except Exception:
+            return None, None
+        return np.array(preds), model_name
+
+    def _calc_lgb_prediction(self, df, pred_days):
+        """LightGBM 預測"""
+        from lightgbm import LGBMRegressor
+        model = LGBMRegressor(n_estimators=200, max_depth=4, learning_rate=0.05,
+                              random_state=42, n_jobs=-1, verbose=-1)
+        return self._calc_model_prediction(df, pred_days, model, 'LightGBM')
+
+    def _calc_cb_prediction(self, df, pred_days):
+        """CatBoost 預測"""
+        from catboost import CatBoostRegressor
+        model = CatBoostRegressor(n_estimators=200, max_depth=4, learning_rate=0.05,
+                                  random_state=42, verbose=0, allow_writing_files=False)
+        return self._calc_model_prediction(df, pred_days, model, 'CatBoost')
+
+    def _calc_gb_prediction(self, df, pred_days):
+        """Gradient Boosting 預測"""
+        from sklearn.ensemble import GradientBoostingRegressor
+        model = GradientBoostingRegressor(n_estimators=200, max_depth=4, learning_rate=0.05,
+                                          random_state=42)
+        return self._calc_model_prediction(df, pred_days, model, 'GBoost')
+
+    def _calc_et_prediction(self, df, pred_days):
+        """Extra Trees 預測"""
+        from sklearn.ensemble import ExtraTreesRegressor
+        model = ExtraTreesRegressor(n_estimators=200, max_depth=6, random_state=42, n_jobs=-1)
+        return self._calc_model_prediction(df, pred_days, model, 'ExtraTree')
+
+    def _calc_stacking_prediction(self, df, pred_days):
+        """Stacking Ensemble 預測（XGBoost + RF + LightGBM + CatBoost + GBoost）"""
+        from sklearn.ensemble import StackingRegressor
+        from sklearn.linear_model import Ridge
+        from xgboost import XGBRegressor
+        from lightgbm import LGBMRegressor
+        from catboost import CatBoostRegressor
+        from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor
+        estimators = [
+            ('xgb', XGBRegressor(n_estimators=100, max_depth=3, random_state=42, verbosity=0)),
+            ('rf', RandomForestRegressor(n_estimators=100, max_depth=4, random_state=42, n_jobs=-1)),
+            ('lgb', LGBMRegressor(n_estimators=100, max_depth=3, random_state=42, verbose=-1)),
+            ('cb', CatBoostRegressor(n_estimators=100, max_depth=3, random_state=42, verbose=0, allow_writing_files=False)),
+            ('gb', GradientBoostingRegressor(n_estimators=100, max_depth=3, random_state=42)),
+        ]
+        model = StackingRegressor(estimators=estimators, final_estimator=Ridge(alpha=1.0), n_jobs=-1)
+        return self._calc_model_prediction(df, pred_days, model, 'Stacking')
+
+    def _draw_ai_prediction(self, future_x, pred, model_name, color):
+        """共用繪圖：在圖表上畫出 AI 預測線與信賴區間"""
+        std = np.std(np.diff(pred)) if len(pred) > 1 else 0
+        upper = pred + 1.96 * std * np.sqrt(np.arange(1, len(pred) + 1))
+        lower = pred - 1.96 * std * np.sqrt(np.arange(1, len(pred) + 1))
+        lower = np.maximum(lower, 0)
+        self.ax.plot(future_x, pred, color=color, linewidth=1.5, linestyle='--',
+                     marker='o', markersize=3)
+        self.ax.fill_between(future_x, lower, upper, color=color, alpha=0.08)
+        self.ax.annotate(f'  {model_name} {pred[-1]:.2f}', xy=(future_x[-1], pred[-1]),
+                         xytext=(0, 15), textcoords='offset points',
+                         fontsize=9, color=color, fontweight='bold', fontfamily=_CHINESE_FONT)
+
+    def _pred_ai(self, df, close, pred_days):
+        """專業 AI 預測（預設使用 XGBoost + 技術指標）"""
+        pred, model_name = self._calc_ai_prediction(df, pred_days)
+        if pred is None:
+            return
+        n = len(close)
+        future_x = np.arange(n, n + len(pred))
+        color = '#00e676'
+        self._draw_ai_prediction(future_x, pred, f'AI ({model_name})', color)
+        from matplotlib.lines import Line2D
+        self.ax.legend(handles=[
+            Line2D([0], [0], color=color, linestyle='--', linewidth=2,
+                   label=f'AI預測 ({model_name}) {pred[-1]:.2f}'),
+        ], fontsize=8, loc='upper right', facecolor='#0d1117', edgecolor='#555555', labelcolor='#e0e0e0')
+
+    def _pred_xgboost(self, df, close, pred_days):
+        """XGBoost + 技術指標預測"""
+        pred, _ = self._calc_ai_prediction(df, pred_days)
+        if pred is None:
+            return
+        n = len(close)
+        future_x = np.arange(n, n + len(pred))
+        color = '#ff6b6b'
+        self._draw_ai_prediction(future_x, pred, 'XGBoost', color)
+        from matplotlib.lines import Line2D
+        self.ax.legend(handles=[
+            Line2D([0], [0], color=color, linestyle='--', linewidth=2,
+                   label=f'XGBoost {pred[-1]:.2f}'),
+        ], fontsize=8, loc='upper right', facecolor='#0d1117', edgecolor='#555555', labelcolor='#e0e0e0')
+
+    def _pred_rf(self, df, close, pred_days):
+        """隨機森林 + 技術指標預測"""
+        pred, _ = self._calc_rf_prediction(df, pred_days)
+        if pred is None:
+            return
+        n = len(close)
+        future_x = np.arange(n, n + len(pred))
+        color = '#4fc3f7'
+        self._draw_ai_prediction(future_x, pred, 'RF', color)
+        from matplotlib.lines import Line2D
+        self.ax.legend(handles=[
+            Line2D([0], [0], color=color, linestyle='--', linewidth=2,
+                   label=f'隨機森林 {pred[-1]:.2f}'),
+        ], fontsize=8, loc='upper right', facecolor='#0d1117', edgecolor='#555555', labelcolor='#e0e0e0')
+
+    def _pred_lgb(self, df, close, pred_days):
+        """LightGBM + 技術指標預測"""
+        pred, _ = self._calc_lgb_prediction(df, pred_days)
+        if pred is None:
+            return
+        n = len(close)
+        future_x = np.arange(n, n + len(pred))
+        color = '#ffd700'
+        self._draw_ai_prediction(future_x, pred, 'LightGBM', color)
+        from matplotlib.lines import Line2D
+        self.ax.legend(handles=[
+            Line2D([0], [0], color=color, linestyle='--', linewidth=2,
+                   label=f'LightGBM {pred[-1]:.2f}'),
+        ], fontsize=8, loc='upper right', facecolor='#0d1117', edgecolor='#555555', labelcolor='#e0e0e0')
+
+    def _pred_cb(self, df, close, pred_days):
+        """CatBoost + 技術指標預測"""
+        pred, _ = self._calc_cb_prediction(df, pred_days)
+        if pred is None:
+            return
+        n = len(close)
+        future_x = np.arange(n, n + len(pred))
+        color = '#ff69b4'
+        self._draw_ai_prediction(future_x, pred, 'CatBoost', color)
+        from matplotlib.lines import Line2D
+        self.ax.legend(handles=[
+            Line2D([0], [0], color=color, linestyle='--', linewidth=2,
+                   label=f'CatBoost {pred[-1]:.2f}'),
+        ], fontsize=8, loc='upper right', facecolor='#0d1117', edgecolor='#555555', labelcolor='#e0e0e0')
+
+    def _pred_gb(self, df, close, pred_days):
+        """Gradient Boosting + 技術指標預測"""
+        pred, _ = self._calc_gb_prediction(df, pred_days)
+        if pred is None:
+            return
+        n = len(close)
+        future_x = np.arange(n, n + len(pred))
+        color = '#00ffff'
+        self._draw_ai_prediction(future_x, pred, 'GBoost', color)
+        from matplotlib.lines import Line2D
+        self.ax.legend(handles=[
+            Line2D([0], [0], color=color, linestyle='--', linewidth=2,
+                   label=f'GBoost {pred[-1]:.2f}'),
+        ], fontsize=8, loc='upper right', facecolor='#0d1117', edgecolor='#555555', labelcolor='#e0e0e0')
+
+    def _pred_et(self, df, close, pred_days):
+        """Extra Trees + 技術指標預測"""
+        pred, _ = self._calc_et_prediction(df, pred_days)
+        if pred is None:
+            return
+        n = len(close)
+        future_x = np.arange(n, n + len(pred))
+        color = '#32cd32'
+        self._draw_ai_prediction(future_x, pred, 'ExtraTree', color)
+        from matplotlib.lines import Line2D
+        self.ax.legend(handles=[
+            Line2D([0], [0], color=color, linestyle='--', linewidth=2,
+                   label=f'ExtraTree {pred[-1]:.2f}'),
+        ], fontsize=8, loc='upper right', facecolor='#0d1117', edgecolor='#555555', labelcolor='#e0e0e0')
+
+    def _pred_stacking(self, df, close, pred_days):
+        """Stacking Ensemble + 技術指標預測"""
+        pred, _ = self._calc_stacking_prediction(df, pred_days)
+        if pred is None:
+            return
+        n = len(close)
+        future_x = np.arange(n, n + len(pred))
+        color = '#ff4500'
+        self._draw_ai_prediction(future_x, pred, 'Stacking', color)
+        from matplotlib.lines import Line2D
+        self.ax.legend(handles=[
+            Line2D([0], [0], color=color, linestyle='--', linewidth=2,
+                   label=f'Stacking {pred[-1]:.2f}'),
         ], fontsize=8, loc='upper right', facecolor='#0d1117', edgecolor='#555555', labelcolor='#e0e0e0')
 
     def search(self):
@@ -1115,8 +1556,8 @@ class StockApp:
         """背景執行下載與資料處理"""
         try:
             symbol = resolve_symbol(query)
-            symbol, df, info = fetch_data(symbol, start_date, end_date)
-            self.root.after(0, self.display_result, query, symbol, df, info)
+            symbol, df, info, avg_price = fetch_data(symbol, start_date, end_date)
+            self.root.after(0, self.display_result, query, symbol, df, info, avg_price)
             # 背景計算相關係數（帶入 generation）
             gen = self._corr_generation
             threading.Thread(target=self.corr_worker, args=(symbol, start_date, end_date, gen), daemon=True).start()
@@ -1138,20 +1579,13 @@ class StockApp:
                                     f"{ch} 正在比較 {code} 與全部股票... {done}/{total}")
                 else:
                     self.root.after(0, self._stop_spinner)
-                    # partial 是 (top5, heatmap_matrix, heatmap_names)
-                    if isinstance(partial, tuple) and len(partial) == 3:
-                        top5, heatmap_matrix, heatmap_names = partial
-                        self.root.after(10, self.show_correlation, symbol, top5,
-                                        heatmap_matrix, heatmap_names)
-                    else:
-                        self.root.after(10, self.show_correlation, symbol, partial,
-                                        None, None)
+                    self.root.after(10, self.show_correlation, symbol, partial)
         except Exception as e:
             if self._corr_generation == generation:
                 self.root.after(0, self._stop_spinner)
                 self.root.after(10, self.corr_text.set, f"計算失敗: {e}")
 
-    def show_correlation(self, symbol, results, heatmap_matrix=None, heatmap_names=None):
+    def show_correlation(self, symbol, results):
         """顯示相關係數結果"""
         if not results:
             self.corr_text.set("無足夠資料計算相關係數")
@@ -1164,68 +1598,7 @@ class StockApp:
             lines.append(f"  {i}. {name}  相關係數: {corr:+.4f}  {bar}")
         self.corr_text.set('\n'.join(lines))
 
-        # 顯示熱力圖
-        if heatmap_matrix is not None and heatmap_names is not None:
-            self.root.after(100, self._show_heatmap, heatmap_matrix, heatmap_names)
-
-    def _show_heatmap(self, matrix, names):
-        """在彈出視窗中顯示相關係數熱力圖"""
-        import matplotlib
-        matplotlib.use('TkAgg')
-        import matplotlib.pyplot as plt
-        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-
-        popup = tk.Toplevel(self.root)
-        popup.title("熱力圖")
-        popup.geometry("600x550")
-        popup.configure(bg='#1a1a2e')
-
-        fig, ax = plt.subplots(figsize=(6, 5), dpi=100)
-        fig.set_facecolor('#1a1a2e')
-        ax.set_facecolor('#16213e')
-
-        n = len(names)
-        data = np.array(matrix)
-
-        # 繪製熱力圖
-        im = ax.imshow(data, cmap='RdYlBu_r', vmin=-1, vmax=1, aspect='equal')
-
-        # 座標軸
-        ax.set_xticks(range(n))
-        ax.set_yticks(range(n))
-        ax.set_xticklabels(names, fontsize=9, color='#e0e0e0', rotation=45, ha='right')
-        ax.set_yticklabels(names, fontsize=9, color='#e0e0e0')
-
-        # 在每個格子顯示數值
-        for i in range(n):
-            for j in range(n):
-                val = data[i, j]
-                text_color = 'white' if abs(val) > 0.5 else 'black'
-                ax.text(j, i, f'{val:.3f}', ha='center', va='center',
-                        fontsize=11, fontweight='bold', color=text_color)
-
-        # 色條
-        cbar = fig.colorbar(im, ax=ax, shrink=0.8, pad=0.02)
-        cbar.ax.tick_params(colors='#e0e0e0')
-        cbar.ax.yaxis.label.set_color('#e0e0e0')
-
-        # 標題
-        ax.set_title('日報酬率相關係數熱力圖', fontsize=13, color='#e0e0e0',
-                     fontfamily='Microsoft JhengHei', pad=12)
-
-        fig.subplots_adjust(left=0.18, right=0.95, top=0.92, bottom=0.18)
-
-        canvas = FigureCanvasTkAgg(fig, master=popup)
-        canvas.draw()
-        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-
-        # 關閉時釋放資源
-        def on_close():
-            plt.close(fig)
-            popup.destroy()
-        popup.protocol("WM_DELETE_WINDOW", on_close)
-
-    def display_result(self, query, symbol, df, info):
+    def display_result(self, query, symbol, df, info, avg_price=None):
         """將查詢結果顯示在 GUI 上（深色主題、3子圖）"""
         if df.empty:
             messagebox.showerror("錯誤", f"股票 {query} 無資料，可能代碼錯誤或已下市。")
@@ -1242,20 +1615,12 @@ class StockApp:
         k_val, d_val = calc_kd(df)
         latest_k = k_val.iloc[-1]
         latest_d = d_val.iloc[-1]
-
-        # 計算最新交易日漲跌
-        latest_close = df['Close'].iloc[-1]
-        prev_close = df['Close'].iloc[-2] if len(df) >= 2 else latest_close
-        change = latest_close - prev_close
-        change_pct = (change / prev_close * 100) if prev_close != 0 else 0
-        if change > 0:
-            change_str = f"↑ +{change:.2f} (+{change_pct:.2f}%)"
-        elif change < 0:
-            change_str = f"↓ {change:.2f} ({change_pct:.2f}%)"
-        else:
-            change_str = f"→ 0.00 (0.00%)"
-
         # 更新資訊區
+        avg_str = f"均價: {avg_price:.2f}" if avg_price else ""
+        latest_vol = df['Volume'].iloc[-1]
+        close_series = df['Close']
+        change = close_series.iloc[-1] - close_series.iloc[-2] if len(close_series) >= 2 else 0
+        change_str = f"漲跌: {change:+.2f}" if change != 0 else "漲跌: 0.00"
         info_text = (
             f"{name} ({symbol})    "
             f"市場: {exchange}    "
@@ -1264,19 +1629,13 @@ class StockApp:
             f"開盤價: {df['Open'].iloc[-1]:.2f}    "
             f"最高價: {df['High'].iloc[-1]:.2f}    "
             f"最低價: {df['Low'].iloc[-1]:.2f}    "
-            f"收盤價: {latest_close:.2f}    "
-            f"漲跌: {change_str}    "
+            f"收盤價: {df['Close'].iloc[-1]:.2f}    "
+            f"{change_str}    "
+            f"總量: {latest_vol/1000:,.1f}張    "
+            f"{avg_str}    "
             f"K: {latest_k:.2f}    D: {latest_d:.2f}"
         )
         self.info_text.set(info_text)
-
-        # 根據漲跌設定文字顏色
-        if change > 0:
-            self.info_label.configure(foreground='#dc2626')  # 紅色=漲
-        elif change < 0:
-            self.info_label.configure(foreground='#16a34a')  # 綠色=跌
-        else:
-            self.info_label.configure(foreground='black')    # 黑色=平
 
         # 清除舊圖
         for ax in (self.ax, self.ax_vol, self.ax_kd):
@@ -1291,23 +1650,23 @@ class StockApp:
         self._ma_texts.clear()
         self._last_df = df
         self._last_symbol = symbol
+        self._x_pos = np.arange(len(df))
+        self._date_index = df.index  # 初始化日期索引（供X軸刻度使用）
         self._click_annotation = None
-        self._vline = None
-        self._crosshair_hline = None
-        self._crosshair_vline = None
-        self._crosshair_price_label = None
 
         # ── K 線（蠟燭圖）──
         width = 0.6
         width2 = 0.05
         up = df[df['Close'] >= df['Open']]
         down = df[df['Close'] < df['Open']]
-        self.ax.bar(up.index, up['Close'] - up['Open'], width, bottom=up['Open'], color='#ef4444', edgecolor='#ef4444')
-        self.ax.bar(up.index, up['High'] - up['Close'], width2, bottom=up['Close'], color='#ef4444')
-        self.ax.bar(up.index, up['Low'] - up['Open'], width2, bottom=up['Open'], color='#ef4444')
-        self.ax.bar(down.index, down['Close'] - down['Open'], width, bottom=down['Open'], color='#22c55e', edgecolor='#22c55e')
-        self.ax.bar(down.index, down['High'] - down['Open'], width2, bottom=down['Open'], color='#22c55e')
-        self.ax.bar(down.index, down['Low'] - down['Close'], width2, bottom=down['Close'], color='#22c55e')
+        up_idx = df.index.get_indexer(up.index)
+        down_idx = df.index.get_indexer(down.index)
+        self.ax.bar(up_idx, up['Close'] - up['Open'], width, bottom=up['Open'], color='#ef4444', edgecolor='#ef4444')
+        self.ax.bar(up_idx, up['High'] - up['Close'], width2, bottom=up['Close'], color='#ef4444')
+        self.ax.bar(up_idx, up['Low'] - up['Open'], width2, bottom=up['Open'], color='#ef4444')
+        self.ax.bar(down_idx, down['Close'] - down['Open'], width, bottom=down['Open'], color='#22c55e', edgecolor='#22c55e')
+        self.ax.bar(down_idx, down['High'] - down['Open'], width2, bottom=down['Open'], color='#22c55e')
+        self.ax.bar(down_idx, down['Low'] - down['Close'], width2, bottom=down['Close'], color='#22c55e')
 
         # 均線（5T週線、10T雙週線、20T月線、60T季線、120T半年線、240T年線）
         ma5 = close.rolling(5).mean()
@@ -1325,7 +1684,7 @@ class StockApp:
             (ma240, '#f44336', '240T(年)'),
         ]
         for ma_series, color, label in ma_cfg:
-            self.ax.plot(df.index, ma_series, color=color, linewidth=1, alpha=0.9, label=label)
+            self.ax.plot(self._x_pos, ma_series, color=color, linewidth=1, alpha=0.9, label=label)
 
         # MA 數值顯示（左上角，每段用對應顏色）
         def _mv(ma):
@@ -1345,7 +1704,7 @@ class StockApp:
                                transform=self.ax.transAxes,
                                fontsize=7.5, color=color, fontweight='bold',
                                va='top', ha='left', zorder=20,
-                               fontfamily='Microsoft JhengHei')
+                               fontfamily=_CHINESE_FONT)
             self._ma_texts.append(txt)
 
         # K線圖格式
@@ -1357,35 +1716,37 @@ class StockApp:
         # ── 成交量柱狀圖 ──
         vol_up = df[volume.index.isin(up.index)]
         vol_down = df[volume.index.isin(down.index)]
-        self.ax_vol.bar(vol_up.index, vol_up['Volume'], width, color='#ef4444', alpha=0.7)
-        self.ax_vol.bar(vol_down.index, vol_down['Volume'], width, color='#22c55e', alpha=0.7)
+        vol_up_idx = df.index.get_indexer(vol_up.index)
+        vol_down_idx = df.index.get_indexer(vol_down.index)
+        self.ax_vol.bar(vol_up_idx, vol_up['Volume'], width, color='#ef4444', alpha=0.7)
+        self.ax_vol.bar(vol_down_idx, vol_down['Volume'], width, color='#22c55e', alpha=0.7)
         # 成交量均線
         vol_ma5 = volume.rolling(5).mean()
         vol_ma10 = volume.rolling(10).mean()
-        self.ax_vol.plot(df.index, vol_ma5, color='#00bcd4', linewidth=0.8, alpha=0.8)
-        self.ax_vol.plot(df.index, vol_ma10, color='#ffeb3b', linewidth=0.8, alpha=0.8)
-        # VOL 數值
+        self.ax_vol.plot(self._x_pos, vol_ma5, color='#00bcd4', linewidth=0.8, alpha=0.8)
+        self.ax_vol.plot(self._x_pos, vol_ma10, color='#ffeb3b', linewidth=0.8, alpha=0.8)
+        # VOL 數值（以張為單位，1張=1000股）
         v5 = vol_ma5.iloc[-1] if not vol_ma5.empty and not pd.isna(vol_ma5.iloc[-1]) else 0
         v10 = vol_ma10.iloc[-1] if not vol_ma10.empty and not pd.isna(vol_ma10.iloc[-1]) else 0
-        vol_text = f"VOL  5T:{v5:,.0f}  10T:{v10:,.0f}"
+        vol_text = f"VOL  5T:{v5/1000:,.0f}張  10T:{v10/1000:,.0f}張"
         t = self.ax_vol.text(0.01, 0.95, vol_text, transform=self.ax_vol.transAxes,
                              fontsize=9, color='#e0e0e0', va='top', ha='left',
                              bbox=dict(boxstyle='round,pad=0.3', facecolor='#0d1117', alpha=0.8))
         self._ma_texts.append(t)
-        self.ax_vol.set_ylabel("成交量", fontsize=10, color=self._text_color)
+        self.ax_vol.set_ylabel("成交量(張)", fontsize=10, color=self._text_color)
         self.ax_vol.grid(True, linestyle='--', alpha=0.15, color=self._grid_color)
         self.ax_vol.yaxis.set_label_position('right')
         self.ax_vol.tick_params(labelleft=False, labelright=True)
-        # 格式化成交量 Y 軸（用萬為單位）
-        self.ax_vol.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x/10000:.0f}萬' if x >= 10000 else f'{x:,.0f}'))
+        # 格式化成交量 Y 軸（以張為單位，1張=1000股）
+        self.ax_vol.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x/1000:,.0f}張'))
 
         # ── KD 指標 ──
-        self.ax_kd.plot(df.index, k_val, color='#00bcd4', linewidth=1.2, label='K')
-        self.ax_kd.plot(df.index, d_val, color='#ffeb3b', linewidth=1.2, label='D')
+        self.ax_kd.plot(self._x_pos, k_val, color='#00bcd4', linewidth=1.2, label='K')
+        self.ax_kd.plot(self._x_pos, d_val, color='#ffeb3b', linewidth=1.2, label='D')
         self.ax_kd.axhline(y=80, color='#555555', linestyle='--', linewidth=0.6)
         self.ax_kd.axhline(y=20, color='#555555', linestyle='--', linewidth=0.6)
-        self.ax_kd.fill_between(df.index, 80, 100, alpha=0.08, color='#ef4444')
-        self.ax_kd.fill_between(df.index, 0, 20, alpha=0.08, color='#22c55e')
+        self.ax_kd.fill_between(self._x_pos, 80, 100, alpha=0.08, color='#ef4444')
+        self.ax_kd.fill_between(self._x_pos, 0, 20, alpha=0.08, color='#22c55e')
         self.ax_kd.set_ylim(0, 100)
         self.ax_kd.set_ylabel("KD", fontsize=10, color=self._text_color)
         self.ax_kd.grid(True, linestyle='--', alpha=0.15, color=self._grid_color)
@@ -1400,11 +1761,28 @@ class StockApp:
         self.ax_kd.legend(fontsize=9, loc='upper right', facecolor='#0d1117',
                           edgecolor='#555555', labelcolor=self._text_color)
 
-        # X軸日期格式
+        # X軸設定（數值位置，避免休市日空白，顯示年月）
         self.ax_kd.set_xlabel("日期", fontsize=10, color=self._text_color)
-        self.ax_kd.xaxis.set_major_locator(mdates.MonthLocator())
-        self.ax_kd.xaxis.set_major_formatter(mdates.DateFormatter('%m'))
-        self.fig.autofmt_xdate(rotation=0)
+        self._set_xlim_all(-0.5, len(df) - 0.5)
+        # 設定X軸刻度顯示年月
+        n = len(self._date_index)
+        def _fmt_date(x, pos):
+            idx = int(round(x))
+            if 0 <= idx < n:
+                return self._date_index[idx].strftime('%Y/%m')
+            return ''
+        if n <= 30:
+            step = 1
+        elif n <= 90:
+            step = 5
+        elif n <= 365:
+            step = 20
+        else:
+            step = 60
+        loc = plt.MultipleLocator(step)
+        for a in (self.ax, self.ax_vol, self.ax_kd):
+            a.xaxis.set_major_locator(loc)
+            a.xaxis.set_major_formatter(plt.FuncFormatter(_fmt_date))
 
         # 未來趨勢預測
         try:
@@ -1413,6 +1791,9 @@ class StockApp:
             pred = 0
         if pred > 0 and len(close) > 10:
             self._draw_prediction(df, close, pred)  # method read from self.pred_method
+            # 延伸X軸以顯示預測區域
+            total = len(self._date_index)
+            self._set_xlim_all(-0.5, total - 0.5)
 
         self.canvas.draw()
         self.btn.config(state=tk.NORMAL, text="查詢")

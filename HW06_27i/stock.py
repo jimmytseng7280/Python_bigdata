@@ -2,8 +2,9 @@
 import yfinance as yf
 import pandas as pd
 import numpy as np
+import platform
 import matplotlib
-matplotlib.use('TkAgg')                     # 使用 Tkinter 後端
+matplotlib.use('TkAgg')
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.patches import Rectangle
@@ -16,6 +17,10 @@ import re
 import urllib3
 import datetime
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# 跨平台中文字型設定
+_IS_MAC = platform.system() == 'Darwin'
+_CHINESE_FONT = 'PingFang TC' if _IS_MAC else 'Microsoft JhengHei'
 
 # twstock 中文名稱對照
 try:
@@ -40,7 +45,7 @@ def label_from_symbol(symbol):
     return f"{name}({base})" if name else base
 
 # 設定中文字型（微軟正黑體）
-plt.rcParams['font.sans-serif'] = ['Microsoft JhengHei']
+plt.rcParams['font.sans-serif'] = [_CHINESE_FONT, 'PingFang TC', 'Heiti TC', 'Microsoft JhengHei', 'Noto Sans CJK TC']
 plt.rcParams['axes.unicode_minus'] = False
 
 # 全域快取與預載資料
@@ -181,7 +186,7 @@ def calc_correlation(target_symbol, start_date=None, end_date=None):
     for i in range(0, total, batch_size):
         batch = all_tickers[i:i + batch_size]
         try:
-            kwargs = {'auto_adjust': False, 'progress': False, 'threads': True}
+            kwargs = {'auto_adjust': True, 'progress': False, 'threads': True}
             if start_date and end_date:
                 kwargs['start'] = start_date
                 kwargs['end'] = end_date
@@ -192,11 +197,7 @@ def calc_correlation(target_symbol, start_date=None, end_date=None):
                 yield min(i + batch_size, total), total, []
                 continue
             if isinstance(df_batch.columns, pd.MultiIndex):
-                # 多檔股票下載：使用 Adj Close 或 Close
-                if 'Adj Close' in df_batch.columns.get_level_values(0):
-                    close_cols = df_batch['Adj Close']
-                else:
-                    close_cols = df_batch['Close']
+                close_cols = df_batch['Close']
                 for ticker in batch:
                     if ticker in close_cols.columns:
                         s = close_cols[ticker].dropna()
@@ -252,18 +253,7 @@ def calc_correlation(target_symbol, start_date=None, end_date=None):
         results.append((col, name, float(corr_val)))
 
     results.sort(key=lambda x: abs(x[2]), reverse=True)
-    top5 = results[:5]
-
-    # 計算目標 + Top5 的相關矩陣（用於熱力圖）
-    heatmap_symbols = [target_col] + [s[0] for s in top5]
-    heatmap_names = [label_from_symbol(target_col)] + [s[1] for s in top5]
-    heatmap_matrix = None
-    if len(heatmap_symbols) >= 2:
-        subset = returns[heatmap_symbols].dropna()
-        if len(subset) >= 30:
-            heatmap_matrix = subset.corr().values.tolist()
-
-    yield total, total, (top5, heatmap_matrix, heatmap_names)
+    yield total, total, results[:5]
 
 def fetch_data(symbol, start_date=None, end_date=None):
     """從 yfinance 下載股價資料，自動嘗試 .TW / .TWO 後綴"""
@@ -271,7 +261,7 @@ def fetch_data(symbol, start_date=None, end_date=None):
     if '.' not in symbol:
         candidates += [f"{symbol}.TW", f"{symbol}.TWO"]
     for sym in candidates:
-        kwargs = {'auto_adjust': False, 'progress': False}
+        kwargs = {'auto_adjust': True, 'progress': False}
         if start_date and end_date:
             kwargs['start'] = start_date
             kwargs['end'] = end_date
@@ -279,13 +269,8 @@ def fetch_data(symbol, start_date=None, end_date=None):
             kwargs['period'] = '2y'
         df = yf.download(sym, **kwargs)
         if not df.empty:
-            # 正確攤平 MultiIndex 欄位
             if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(0)
-            # 手動調整：用 Adj Close 替換 Close（如果有）
-            if 'Adj Close' in df.columns:
-                df['Close'] = df['Adj Close']
-                df.drop(columns=['Adj Close'], inplace=True)
+                df.columns = df.columns.droplevel(1)
             try:
                 info = yf.Ticker(sym).info
             except Exception:
@@ -357,9 +342,8 @@ class StockApp:
         self.info_frame.pack(fill=tk.X, padx=10, pady=(0, 5))
 
         self.info_text = tk.StringVar()
-        self.info_label = tk.Label(self.info_frame, textvariable=self.info_text,
-                                   font=('Microsoft JhengHei', 11), fg='black')
-        self.info_label.pack(padx=10, pady=8)
+        ttk.Label(self.info_frame, textvariable=self.info_text,
+                  font=(_CHINESE_FONT, 11)).pack(padx=10, pady=8)
 
         # 相關係數區：顯示前五名高相關股票
         self.corr_frame = ttk.LabelFrame(root, text="日報酬率相關係數 Top 5")
@@ -367,7 +351,7 @@ class StockApp:
 
         self.corr_text = tk.StringVar(value="查詢後自動計算...")
         ttk.Label(self.corr_frame, textvariable=self.corr_text,
-                  font=('Microsoft JhengHei', 10), justify=tk.LEFT).pack(padx=10, pady=6, anchor=tk.W)
+                  font=(_CHINESE_FONT, 10), justify=tk.LEFT).pack(padx=10, pady=6, anchor=tk.W)
 
         # 旋轉動畫狀態
         self._spinner_running = False
@@ -574,7 +558,7 @@ class StockApp:
 
         # 標題
         tk.Label(popup, text=f"  {day.strftime('%Y-%m-%d')} ({day.strftime('%A')})",
-                 font=('Microsoft JhengHei', 12, 'bold'), fg='#00bcd4', bg=bg).pack(fill=tk.X, pady=(10, 5))
+                 font=(_CHINESE_FONT, 12, 'bold'), fg='#00bcd4', bg=bg).pack(fill=tk.X, pady=(10, 5))
 
         # 資料表格
         data = [
@@ -595,13 +579,13 @@ class StockApp:
 
         for i, (label, value, color) in enumerate(data):
             r_bg = row_bg if i % 2 == 0 else bg
-            tk.Label(table_frame, text=label, font=('Microsoft JhengHei', 10),
+            tk.Label(table_frame, text=label, font=(_CHINESE_FONT, 10),
                      fg='#aaaaaa', bg=r_bg, anchor='w').grid(row=i, column=0, sticky='w', padx=(10, 5), pady=4)
-            tk.Label(table_frame, text=value, font=('Microsoft JhengHei', 10, 'bold'),
+            tk.Label(table_frame, text=value, font=(_CHINESE_FONT, 10, 'bold'),
                      fg=color, bg=r_bg, anchor='e').grid(row=i, column=1, sticky='e', padx=(5, 10), pady=4)
 
         # 關閉按鈕
-        tk.Button(popup, text="關閉", command=popup.destroy, font=('Microsoft JhengHei', 10),
+        tk.Button(popup, text="關閉", command=popup.destroy, font=(_CHINESE_FONT, 10),
                   bg='#333333', fg='white', activebackground='#555555', relief=tk.FLAT,
                   padx=20, pady=5).pack(pady=(5, 10))
 
@@ -809,7 +793,7 @@ class StockApp:
         self.ax.text(0.02, 0.82,
                      f'MC 上漲 {up_prob:.1f}% / 下跌 {100-up_prob:.1f}%　MA5/MA10 {direction}頭',
                      transform=self.ax.transAxes, fontsize=8, color='#e0e0e0',
-                     fontfamily='Microsoft JhengHei', verticalalignment='top',
+                     fontfamily=_CHINESE_FONT, verticalalignment='top',
                      bbox=dict(boxstyle='round,pad=0.3', facecolor='#1a1a2e', edgecolor='#555555'))
 
         self.ax.legend(handles=legend_handles, fontsize=7, loc='lower right',
@@ -836,7 +820,7 @@ class StockApp:
                         edgecolors='white', linewidth=0.5)
         self.ax.annotate(f'  預測 {pred[-1]:.2f}', xy=(future_dates[-1], pred[-1]),
                          xytext=(0, 15), textcoords='offset points',
-                         fontsize=9, color='#888888', fontweight='bold', fontfamily='Microsoft JhengHei')
+                         fontsize=9, color='#888888', fontweight='bold', fontfamily=_CHINESE_FONT)
         self.ax.axvspan(df.index[-1], future_dates[-1], alpha=0.04, color='#888888')
         from matplotlib.lines import Line2D
         self.ax.legend(handles=[
@@ -865,7 +849,7 @@ class StockApp:
                         edgecolors='white', linewidth=0.5)
         self.ax.annotate(f'  預測 {pred[-1]:.2f}', xy=(future_dates[-1], pred[-1]),
                          xytext=(0, 15), textcoords='offset points',
-                         fontsize=9, color='#ff9800', fontweight='bold', fontfamily='Microsoft JhengHei')
+                         fontsize=9, color='#ff9800', fontweight='bold', fontfamily=_CHINESE_FONT)
         self.ax.axvspan(df.index[-1], future_dates[-1], alpha=0.04, color='#ff9800')
         from matplotlib.lines import Line2D
         self.ax.legend(handles=[
@@ -901,18 +885,18 @@ class StockApp:
                         edgecolors='white', linewidth=0.5)
         self.ax.annotate(f'  均值 {mc_mean[-1]:.2f}', xy=(future_dates[-1], mc_mean[-1]),
                          xytext=(0, 15), textcoords='offset points',
-                         fontsize=9, color='#bb86fc', fontweight='bold', fontfamily='Microsoft JhengHei')
+                         fontsize=9, color='#bb86fc', fontweight='bold', fontfamily=_CHINESE_FONT)
         self.ax.annotate(f'{mc_p95[-1]:.2f}', xy=(future_dates[-1], mc_p95[-1]),
                          xytext=(0, 5), textcoords='offset points',
-                         fontsize=7, color='#888888', fontfamily='Microsoft JhengHei')
+                         fontsize=7, color='#888888', fontfamily=_CHINESE_FONT)
         self.ax.annotate(f'{mc_p5[-1]:.2f}', xy=(future_dates[-1], mc_p5[-1]),
                          xytext=(0, -10), textcoords='offset points',
-                         fontsize=7, color='#888888', fontfamily='Microsoft JhengHei')
+                         fontsize=7, color='#888888', fontfamily=_CHINESE_FONT)
         up_prob = np.mean(sims[:, -1] > S0) * 100
         self.ax.text(0.02, 0.82,
                      f'上漲機率 {up_prob:.1f}%　下跌機率 {100-up_prob:.1f}%',
                      transform=self.ax.transAxes, fontsize=9, color='#e0e0e0',
-                     fontfamily='Microsoft JhengHei', verticalalignment='top',
+                     fontfamily=_CHINESE_FONT, verticalalignment='top',
                      bbox=dict(boxstyle='round,pad=0.3', facecolor='#1a1a2e', edgecolor='#555555'))
         self.ax.axvspan(df.index[-1], future_dates[-1], alpha=0.04, color='#bb86fc')
         from matplotlib.lines import Line2D
@@ -962,7 +946,7 @@ class StockApp:
                         edgecolors='white', linewidth=0.5)
         self.ax.annotate(f'  預測 {pred[-1]:.2f}', xy=(future_dates[-1], pred[-1]),
                          xytext=(0, 15), textcoords='offset points',
-                         fontsize=9, color='#00bcd4', fontweight='bold', fontfamily='Microsoft JhengHei')
+                         fontsize=9, color='#00bcd4', fontweight='bold', fontfamily=_CHINESE_FONT)
         self.ax.axvspan(df.index[-1], future_dates[-1], alpha=0.04, color='#00bcd4')
         from matplotlib.lines import Line2D
         self.ax.legend(handles=[
@@ -1017,11 +1001,11 @@ class StockApp:
                         edgecolors='white', linewidth=0.5)
         self.ax.annotate(f'  預測 {pred[-1]:.2f}', xy=(future_dates[-1], pred[-1]),
                          xytext=(0, 15), textcoords='offset points',
-                         fontsize=9, color=color, fontweight='bold', fontfamily='Microsoft JhengHei')
+                         fontsize=9, color=color, fontweight='bold', fontfamily=_CHINESE_FONT)
         self.ax.text(0.02, 0.82,
                      f'MA5/MA10 {direction}　MA5={ma5[-1]:.2f} MA10={ma10[-1]:.2f}',
                      transform=self.ax.transAxes, fontsize=9, color='#e0e0e0',
-                     fontfamily='Microsoft JhengHei', verticalalignment='top',
+                     fontfamily=_CHINESE_FONT, verticalalignment='top',
                      bbox=dict(boxstyle='round,pad=0.3', facecolor='#1a1a2e', edgecolor='#555555'))
         self.ax.axvspan(df.index[-1], future_dates[-1], alpha=0.04, color=color)
         from matplotlib.lines import Line2D
@@ -1073,11 +1057,11 @@ class StockApp:
                         edgecolors='white', linewidth=0.5)
         self.ax.annotate(f'  預測 {pred[-1]:.2f}', xy=(future_dates[-1], pred[-1]),
                          xytext=(0, 15), textcoords='offset points',
-                         fontsize=9, color='#e040fb', fontweight='bold', fontfamily='Microsoft JhengHei')
+                         fontsize=9, color='#e040fb', fontweight='bold', fontfamily=_CHINESE_FONT)
         self.ax.text(0.02, 0.82,
                      f'布林通道　上軌 {upper_band:.2f}　MA20 {current_ma:.2f}　下軌 {lower_band:.2f}',
                      transform=self.ax.transAxes, fontsize=9, color='#e0e0e0',
-                     fontfamily='Microsoft JhengHei', verticalalignment='top',
+                     fontfamily=_CHINESE_FONT, verticalalignment='top',
                      bbox=dict(boxstyle='round,pad=0.3', facecolor='#1a1a2e', edgecolor='#555555'))
         self.ax.axvspan(df.index[-1], future_dates[-1], alpha=0.04, color='#e040fb')
         from matplotlib.lines import Line2D
@@ -1138,20 +1122,13 @@ class StockApp:
                                     f"{ch} 正在比較 {code} 與全部股票... {done}/{total}")
                 else:
                     self.root.after(0, self._stop_spinner)
-                    # partial 是 (top5, heatmap_matrix, heatmap_names)
-                    if isinstance(partial, tuple) and len(partial) == 3:
-                        top5, heatmap_matrix, heatmap_names = partial
-                        self.root.after(10, self.show_correlation, symbol, top5,
-                                        heatmap_matrix, heatmap_names)
-                    else:
-                        self.root.after(10, self.show_correlation, symbol, partial,
-                                        None, None)
+                    self.root.after(10, self.show_correlation, symbol, partial)
         except Exception as e:
             if self._corr_generation == generation:
                 self.root.after(0, self._stop_spinner)
                 self.root.after(10, self.corr_text.set, f"計算失敗: {e}")
 
-    def show_correlation(self, symbol, results, heatmap_matrix=None, heatmap_names=None):
+    def show_correlation(self, symbol, results):
         """顯示相關係數結果"""
         if not results:
             self.corr_text.set("無足夠資料計算相關係數")
@@ -1163,67 +1140,6 @@ class StockApp:
             bar = '█' * bar_len + '░' * (20 - bar_len)
             lines.append(f"  {i}. {name}  相關係數: {corr:+.4f}  {bar}")
         self.corr_text.set('\n'.join(lines))
-
-        # 顯示熱力圖
-        if heatmap_matrix is not None and heatmap_names is not None:
-            self.root.after(100, self._show_heatmap, heatmap_matrix, heatmap_names)
-
-    def _show_heatmap(self, matrix, names):
-        """在彈出視窗中顯示相關係數熱力圖"""
-        import matplotlib
-        matplotlib.use('TkAgg')
-        import matplotlib.pyplot as plt
-        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-
-        popup = tk.Toplevel(self.root)
-        popup.title("熱力圖")
-        popup.geometry("600x550")
-        popup.configure(bg='#1a1a2e')
-
-        fig, ax = plt.subplots(figsize=(6, 5), dpi=100)
-        fig.set_facecolor('#1a1a2e')
-        ax.set_facecolor('#16213e')
-
-        n = len(names)
-        data = np.array(matrix)
-
-        # 繪製熱力圖
-        im = ax.imshow(data, cmap='RdYlBu_r', vmin=-1, vmax=1, aspect='equal')
-
-        # 座標軸
-        ax.set_xticks(range(n))
-        ax.set_yticks(range(n))
-        ax.set_xticklabels(names, fontsize=9, color='#e0e0e0', rotation=45, ha='right')
-        ax.set_yticklabels(names, fontsize=9, color='#e0e0e0')
-
-        # 在每個格子顯示數值
-        for i in range(n):
-            for j in range(n):
-                val = data[i, j]
-                text_color = 'white' if abs(val) > 0.5 else 'black'
-                ax.text(j, i, f'{val:.3f}', ha='center', va='center',
-                        fontsize=11, fontweight='bold', color=text_color)
-
-        # 色條
-        cbar = fig.colorbar(im, ax=ax, shrink=0.8, pad=0.02)
-        cbar.ax.tick_params(colors='#e0e0e0')
-        cbar.ax.yaxis.label.set_color('#e0e0e0')
-
-        # 標題
-        ax.set_title('日報酬率相關係數熱力圖', fontsize=13, color='#e0e0e0',
-                     fontfamily='Microsoft JhengHei', pad=12)
-
-        fig.subplots_adjust(left=0.18, right=0.95, top=0.92, bottom=0.18)
-
-        canvas = FigureCanvasTkAgg(fig, master=popup)
-        canvas.draw()
-        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-
-        # 關閉時釋放資源
-        def on_close():
-            plt.close(fig)
-            popup.destroy()
-        popup.protocol("WM_DELETE_WINDOW", on_close)
 
     def display_result(self, query, symbol, df, info):
         """將查詢結果顯示在 GUI 上（深色主題、3子圖）"""
@@ -1243,18 +1159,6 @@ class StockApp:
         latest_k = k_val.iloc[-1]
         latest_d = d_val.iloc[-1]
 
-        # 計算最新交易日漲跌
-        latest_close = df['Close'].iloc[-1]
-        prev_close = df['Close'].iloc[-2] if len(df) >= 2 else latest_close
-        change = latest_close - prev_close
-        change_pct = (change / prev_close * 100) if prev_close != 0 else 0
-        if change > 0:
-            change_str = f"↑ +{change:.2f} (+{change_pct:.2f}%)"
-        elif change < 0:
-            change_str = f"↓ {change:.2f} ({change_pct:.2f}%)"
-        else:
-            change_str = f"→ 0.00 (0.00%)"
-
         # 更新資訊區
         info_text = (
             f"{name} ({symbol})    "
@@ -1264,19 +1168,10 @@ class StockApp:
             f"開盤價: {df['Open'].iloc[-1]:.2f}    "
             f"最高價: {df['High'].iloc[-1]:.2f}    "
             f"最低價: {df['Low'].iloc[-1]:.2f}    "
-            f"收盤價: {latest_close:.2f}    "
-            f"漲跌: {change_str}    "
+            f"收盤價: {df['Close'].iloc[-1]:.2f}    "
             f"K: {latest_k:.2f}    D: {latest_d:.2f}"
         )
         self.info_text.set(info_text)
-
-        # 根據漲跌設定文字顏色
-        if change > 0:
-            self.info_label.configure(foreground='#dc2626')  # 紅色=漲
-        elif change < 0:
-            self.info_label.configure(foreground='#16a34a')  # 綠色=跌
-        else:
-            self.info_label.configure(foreground='black')    # 黑色=平
 
         # 清除舊圖
         for ax in (self.ax, self.ax_vol, self.ax_kd):
@@ -1345,7 +1240,7 @@ class StockApp:
                                transform=self.ax.transAxes,
                                fontsize=7.5, color=color, fontweight='bold',
                                va='top', ha='left', zorder=20,
-                               fontfamily='Microsoft JhengHei')
+                               fontfamily=_CHINESE_FONT)
             self._ma_texts.append(txt)
 
         # K線圖格式
