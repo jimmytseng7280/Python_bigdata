@@ -650,7 +650,7 @@ class StockApp:
         ttk.Label(date_frame, text="    預測方法:").pack(side=tk.LEFT)
         self.pred_method = tk.StringVar(value="全部")
         method_combo = ttk.Combobox(date_frame, textvariable=self.pred_method,
-                                    values=["全部", "AI預測", "XGBoost", "隨機森林", "LightGBM", "CatBoost", "GBoost", "ExtraTree", "Stacking", "線性", "多項式", "蒙地卡羅", "指數平滑", "MA交叉", "布林通道"],
+                                    values=["全部", "AI預測", "XGBoost", "隨機森林", "LightGBM", "CatBoost", "GBoost", "ExtraTree", "Stacking", "線性", "多項式", "蒙地卡羅", "指數平滑", "MA交叉", "布林通道", "LSTM", "GRU", "Transformer"],
                                     width=8, state='readonly')
         method_combo.pack(side=tk.LEFT, padx=2)
 
@@ -951,6 +951,12 @@ class StockApp:
             self._pred_exp_smoothing(df, close, pred_days)
         elif method == "MA交叉":
             self._pred_ma_cross(df, close, pred_days)
+        elif method == "LSTM":
+            self._pred_lstm(df, close, pred_days)
+        elif method == "GRU":
+            self._pred_gru(df, close, pred_days)
+        elif method == "Transformer":
+            self._pred_transformer(df, close, pred_days)
         else:
             self._pred_bollinger(df, close, pred_days)
 
@@ -1101,6 +1107,30 @@ class StockApp:
             legend_handles.append(Line2D([0], [0], color='#ff4500', linestyle='--', linewidth=1.5,
                                          label=f'Stacking {st_pred[-1]:.2f}'))
 
+        # 14. LSTM（深青色 #00897b）
+        lstm_pred = calc_dl_prediction(df, 'lstm', pred_days)
+        if lstm_pred is not None:
+            lstm_future = np.arange(n, n + len(lstm_pred))
+            self.ax.plot(lstm_future, lstm_pred, color='#00897b', linewidth=1.5, linestyle='--', alpha=0.9)
+            legend_handles.append(Line2D([0], [0], color='#00897b', linestyle='--', linewidth=1.5,
+                                         label=f'LSTM {lstm_pred[-1]:.2f}'))
+
+        # 15. GRU（玫紅 #c2185b）
+        gru_pred = calc_dl_prediction(df, 'gru', pred_days)
+        if gru_pred is not None:
+            gru_future = np.arange(n, n + len(gru_pred))
+            self.ax.plot(gru_future, gru_pred, color='#c2185b', linewidth=1.5, linestyle='--', alpha=0.9)
+            legend_handles.append(Line2D([0], [0], color='#c2185b', linestyle='--', linewidth=1.5,
+                                         label=f'GRU {gru_pred[-1]:.2f}'))
+
+        # 16. Transformer（寶石藍 #5c6bc0）
+        tf_pred = calc_dl_prediction(df, 'transformer', pred_days)
+        if tf_pred is not None:
+            tf_future = np.arange(n, n + len(tf_pred))
+            self.ax.plot(tf_future, tf_pred, color='#5c6bc0', linewidth=1.5, linestyle='--', alpha=0.9)
+            legend_handles.append(Line2D([0], [0], color='#5c6bc0', linestyle='--', linewidth=1.5,
+                                         label=f'Transformer {tf_pred[-1]:.2f}'))
+
         self.ax.axvspan(n - 1, n - 1 + pred_days, alpha=0.03, color='#bb86fc')
 
         # 機率文字
@@ -1109,6 +1139,62 @@ class StockApp:
                      transform=self.ax.transAxes, fontsize=8, color='#e0e0e0',
                      fontfamily=_CHINESE_FONT, verticalalignment='top',
                      bbox=dict(boxstyle='round,pad=0.3', facecolor='#1a1a2e', edgecolor='#555555'))
+
+        # ── 收集所有最終值，按價格排序後在圖上以曲線顏色標註 ──
+        final_values = [
+            ('線性', pred1[-1], '#888888'), ('多項式', pred2[-1], '#ff9800'),
+            ('MC均值', mc_mean[-1], '#bb86fc'), ('指數平滑', pred4[-1], '#00bcd4'),
+            ('MA交叉', pred5[-1], color5), ('布林', pred6[-1], '#e040fb'),
+        ]
+        if xgb_pred is not None:
+            final_values.append(('XGBoost', xgb_pred[-1], '#ff6b6b'))
+        if rf_pred is not None:
+            final_values.append(('RF', rf_pred[-1], '#4fc3f7'))
+        if lgb_pred is not None:
+            final_values.append(('LGBM', lgb_pred[-1], '#ffd700'))
+        if cb_pred is not None:
+            final_values.append(('CatB', cb_pred[-1], '#ff69b4'))
+        if gb_pred is not None:
+            final_values.append(('GBoost', gb_pred[-1], '#00ffff'))
+        if et_pred is not None:
+            final_values.append(('ET', et_pred[-1], '#32cd32'))
+        if st_pred is not None:
+            final_values.append(('Stack', st_pred[-1], '#ff4500'))
+        if lstm_pred is not None:
+            final_values.append(('LSTM', lstm_pred[-1], '#00897b'))
+        if gru_pred is not None:
+            final_values.append(('GRU', gru_pred[-1], '#c2185b'))
+        if tf_pred is not None:
+            final_values.append(('TF', tf_pred[-1], '#5c6bc0'))
+        final_values.sort(key=lambda x: x[1], reverse=True)
+
+        # 在預測線末端標註最終值（用曲線顏色），自動避開重疊
+        for idx, (name, val, clr) in enumerate(final_values):
+            # 根據價格位置計算偏移，避免文字重疊
+            self.ax.annotate(
+                f'{val:.2f}', xy=(n + pred_days - 1, val),
+                xytext=(8, 0), textcoords='offset points',
+                fontsize=5.5, color=clr, fontfamily=_CHINESE_FONT, fontweight='bold',
+                verticalalignment='center',
+                bbox=dict(boxstyle='round,pad=0.12', facecolor='#0d1117', edgecolor=clr, alpha=0.9, linewidth=0.4),
+                clip_on=False, zorder=20)
+
+        # 在圖表左下角顯示完整預測值表格（按價格由高到低）
+        table_lines = []
+        for name, val, clr in final_values:
+            table_lines.append((name, val, clr))
+        # 分兩欄顯示
+        col_count = (len(table_lines) + 1) // 2
+        for i, (name, val, clr) in enumerate(table_lines):
+            col = 0 if i < col_count else 1
+            row = i if i < col_count else i - col_count
+            tx = 0.01 + col * 0.28
+            ty = 0.76 - row * 0.042
+            self.ax.text(tx, ty, f'{name}: {val:.2f}',
+                         transform=self.ax.transAxes, fontsize=6, color=clr,
+                         fontfamily=_CHINESE_FONT, fontweight='bold', verticalalignment='top',
+                         bbox=dict(boxstyle='round,pad=0.1', facecolor='#0d1117', edgecolor=clr, alpha=0.85, linewidth=0.4),
+                         zorder=25)
 
         self.ax.legend(handles=legend_handles, fontsize=7, loc='lower right',
                        facecolor='#0d1117', edgecolor='#555555', labelcolor='#e0e0e0', ncol=3)
@@ -1778,6 +1864,51 @@ class StockApp:
         self.ax.legend(handles=[
             Line2D([0], [0], color=color, linestyle='--', linewidth=2,
                    label=f'Stacking {pred[-1]:.2f}'),
+        ], fontsize=8, loc='upper right', facecolor='#0d1117', edgecolor='#555555', labelcolor='#e0e0e0')
+
+    def _pred_lstm(self, df, close, pred_days):
+        """LSTM 深度學習預測"""
+        pred = calc_dl_prediction(df, 'lstm', pred_days)
+        if pred is None:
+            return
+        n = len(close)
+        future_x = np.arange(n, n + len(pred))
+        color = '#00897b'
+        self._draw_ai_prediction(future_x, pred, 'LSTM', color)
+        from matplotlib.lines import Line2D
+        self.ax.legend(handles=[
+            Line2D([0], [0], color=color, linestyle='--', linewidth=2,
+                   label=f'LSTM {pred[-1]:.2f}'),
+        ], fontsize=8, loc='upper right', facecolor='#0d1117', edgecolor='#555555', labelcolor='#e0e0e0')
+
+    def _pred_gru(self, df, close, pred_days):
+        """GRU 深度學習預測"""
+        pred = calc_dl_prediction(df, 'gru', pred_days)
+        if pred is None:
+            return
+        n = len(close)
+        future_x = np.arange(n, n + len(pred))
+        color = '#c2185b'
+        self._draw_ai_prediction(future_x, pred, 'GRU', color)
+        from matplotlib.lines import Line2D
+        self.ax.legend(handles=[
+            Line2D([0], [0], color=color, linestyle='--', linewidth=2,
+                   label=f'GRU {pred[-1]:.2f}'),
+        ], fontsize=8, loc='upper right', facecolor='#0d1117', edgecolor='#555555', labelcolor='#e0e0e0')
+
+    def _pred_transformer(self, df, close, pred_days):
+        """Transformer 深度學習預測"""
+        pred = calc_dl_prediction(df, 'transformer', pred_days)
+        if pred is None:
+            return
+        n = len(close)
+        future_x = np.arange(n, n + len(pred))
+        color = '#5c6bc0'
+        self._draw_ai_prediction(future_x, pred, 'Transformer', color)
+        from matplotlib.lines import Line2D
+        self.ax.legend(handles=[
+            Line2D([0], [0], color=color, linestyle='--', linewidth=2,
+                   label=f'Transformer {pred[-1]:.2f}'),
         ], fontsize=8, loc='upper right', facecolor='#0d1117', edgecolor='#555555', labelcolor='#e0e0e0')
 
     def search(self):
