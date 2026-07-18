@@ -1168,32 +1168,46 @@ class StockApp:
             final_values.append(('TF', tf_pred[-1], '#5c6bc0'))
         final_values.sort(key=lambda x: x[1], reverse=True)
 
-        # 在預測線末端標註最終值（用曲線顏色），自動避開重疊
+        # 在預測線末端標註最終值（用曲線顏色），避開重疊
+        last_y = None
+        y_range = max(v for _, v, _ in final_values) - min(v for _, v, _ in final_values) if len(final_values) > 1 else 10
+        gap = y_range * 0.02 if y_range > 0 else 2
+        used_positions = []
         for idx, (name, val, clr) in enumerate(final_values):
-            # 根據價格位置計算偏移，避免文字重疊
+            display_y = val
+            for uy in used_positions:
+                if abs(display_y - uy) < gap:
+                    display_y = uy + gap
+            used_positions.append(display_y)
             self.ax.annotate(
                 f'{val:.2f}', xy=(n + pred_days - 1, val),
-                xytext=(8, 0), textcoords='offset points',
-                fontsize=5.5, color=clr, fontfamily=_CHINESE_FONT, fontweight='bold',
+                xytext=(10, 0), textcoords='offset points',
+                fontsize=7, color=clr, fontfamily=_CHINESE_FONT, fontweight='bold',
                 verticalalignment='center',
-                bbox=dict(boxstyle='round,pad=0.12', facecolor='#0d1117', edgecolor=clr, alpha=0.9, linewidth=0.4),
-                clip_on=False, zorder=20)
+                bbox=dict(boxstyle='round,pad=0.15', facecolor='#0d1117', edgecolor=clr, alpha=0.95, linewidth=0.6),
+                clip_on=False, zorder=30)
 
-        # 在圖表左下角顯示完整預測值表格（按價格由高到低）
-        table_lines = []
-        for name, val, clr in final_values:
-            table_lines.append((name, val, clr))
+        # 在預測區域左下角顯示完整預測值表格（按價格由高到低）
+        S0 = y[-1]
+        header = f'▼ 預測{pred_days}日最終值 (目前:{S0:.2f})'
+        self.ax.text(0.01, 0.97, header,
+                     transform=self.ax.transAxes, fontsize=7, color='#e0e0e0',
+                     fontfamily=_CHINESE_FONT, fontweight='bold', verticalalignment='top',
+                     bbox=dict(boxstyle='round,pad=0.2', facecolor='#0d1117', edgecolor='#555555', alpha=0.9),
+                     zorder=25)
         # 分兩欄顯示
-        col_count = (len(table_lines) + 1) // 2
-        for i, (name, val, clr) in enumerate(table_lines):
+        col_count = (len(final_values) + 1) // 2
+        for i, (name, val, clr) in enumerate(final_values):
             col = 0 if i < col_count else 1
             row = i if i < col_count else i - col_count
-            tx = 0.01 + col * 0.28
-            ty = 0.76 - row * 0.042
-            self.ax.text(tx, ty, f'{name}: {val:.2f}',
-                         transform=self.ax.transAxes, fontsize=6, color=clr,
+            tx = 0.01 + col * 0.25
+            ty = 0.93 - row * 0.045
+            pct = (val - S0) / S0 * 100
+            arrow = '↑' if pct > 0 else '↓' if pct < 0 else '-'
+            self.ax.text(tx, ty, f'{name}: {val:.2f} ({arrow}{abs(pct):.1f}%)',
+                         transform=self.ax.transAxes, fontsize=7, color=clr,
                          fontfamily=_CHINESE_FONT, fontweight='bold', verticalalignment='top',
-                         bbox=dict(boxstyle='round,pad=0.1', facecolor='#0d1117', edgecolor=clr, alpha=0.85, linewidth=0.4),
+                         bbox=dict(boxstyle='round,pad=0.1', facecolor='#0d1117', edgecolor=clr, alpha=0.9, linewidth=0.5),
                          zorder=25)
 
         self.ax.legend(handles=legend_handles, fontsize=7, loc='lower right',
