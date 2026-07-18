@@ -670,6 +670,14 @@ class StockApp:
         ttk.Label(self.corr_frame, textvariable=self.corr_text,
                   font=(_CHINESE_FONT, 10), justify=tk.LEFT).pack(padx=10, pady=6, anchor=tk.W)
 
+        # 預測值區：顯示各方法預測結果
+        self.pred_frame = ttk.LabelFrame(root, text="預測值")
+        self.pred_frame.pack(fill=tk.X, padx=10, pady=(0, 5))
+
+        self.pred_text = tk.StringVar(value="查詢後自動預測...")
+        ttk.Label(self.pred_frame, textvariable=self.pred_text,
+                  font=(_CHINESE_FONT, 10), justify=tk.LEFT).pack(padx=10, pady=6, anchor=tk.W)
+
         # 旋轉動畫狀態
         self._spinner_running = False
         self._spinner_idx = 0
@@ -960,6 +968,18 @@ class StockApp:
         else:
             self._pred_bollinger(df, close, pred_days)
 
+        # ===== 單一方法的 tkinter 預測值面板 =====
+        if method != "全部":
+            S0 = close.values[-1]
+            lines = []
+            lines.append(f'目前股價: {S0:.2f}  |  預測天數: {pred_days}日  |  方法: {method}')
+            lines.append('─' * 50)
+            legend = self.ax.get_legend()
+            if legend is not None:
+                for text in legend.get_texts():
+                    lines.append(f'  {text.get_text()}')
+            self.pred_text.set('\n'.join(lines))
+
     def _pred_all(self, df, close, pred_days):
         """同時顯示全部預測方法"""
         from matplotlib.lines import Line2D
@@ -1168,7 +1188,7 @@ class StockApp:
             final_values.append(('TF', tf_pred[-1], '#5c6bc0'))
         final_values.sort(key=lambda x: x[1], reverse=True)
 
-        # 在預測線末端標註最終值（用曲線顏色），避開重疊
+        # 在圖表上用 matplotlib annotate 標註最終值（曲線末端）
         S0 = y[-1]
         y_range = max(v for _, v, _ in final_values) - min(v for _, v, _ in final_values) if len(final_values) > 1 else 10
         gap = y_range * 0.03 if y_range > 0 else 5
@@ -1192,6 +1212,16 @@ class StockApp:
 
         self.ax.legend(handles=legend_handles, fontsize=7, loc='lower right',
                        facecolor='#0d1117', edgecolor='#555555', labelcolor='#e0e0e0', ncol=3)
+
+        # ===== 用 tkinter 面板顯示預測值（100% 可靠）=====
+        lines = []
+        lines.append(f'目前股價: {S0:.2f}  |  預測天數: {pred_days}日  |  方法: {self.pred_method.get()}')
+        lines.append('─' * 80)
+        for name, val, clr in final_values:
+            pct = (val - S0) / S0 * 100
+            arrow = '▲' if pct > 0 else '▼' if pct < 0 else '─'
+            lines.append(f'  {name:>8s}: {val:>10.2f}  {arrow} {pct:>+7.2f}%')
+        self.pred_text.set('\n'.join(lines))
 
     def _pred_linear(self, df, close, pred_days):
         """線性回歸預測"""
@@ -1982,6 +2012,7 @@ class StockApp:
             messagebox.showerror("錯誤", f"股票 {query} 無資料，可能代碼錯誤或已下市。")
             self.btn.config(state=tk.NORMAL, text="查詢")
             self.info_text.set("")
+            self.pred_text.set("查詢後自動預測...")
             return
 
         name = fetch_chinese_name(symbol) or info.get('longName') or info.get('shortName') or ''
@@ -2149,7 +2180,9 @@ class StockApp:
         try:
             pred = int(self.pred_days.get())
         except Exception:
-            pred = 0
+            pred = 20
+        if pred <= 0:
+            pred = 20
         if pred > 0 and len(close) > 10:
             self._draw_prediction(df, close, pred)  # method read from self.pred_method
             # 延伸X軸以顯示預測區域
