@@ -612,6 +612,37 @@ class StockApp:
             zorder=30)
         self.canvas.draw_idle()
 
+    def _apply_date_axis(self, xmin, xmax):
+        """根據可見範圍自動調整X軸日期格式與刻度密度"""
+        if self._last_df is None:
+            return
+        date_index = getattr(self, '_date_index', self._last_df.index)
+        n = len(date_index)
+        span = xmax - xmin
+        # 根據可見範圍決定格式與步進
+        if span <= 30:
+            fmt_str = '%m/%d'
+            step = max(1, int(span / 15))
+        elif span <= 120:
+            fmt_str = '%Y/%m/%d'
+            step = max(1, int(span / 15))
+        elif span <= 365:
+            fmt_str = '%Y/%m'
+            step = max(5, int(span / 15))
+        else:
+            fmt_str = '%Y/%m'
+            step = max(20, int(span / 12))
+
+        def fmt(x, pos):
+            idx = int(round(x))
+            if 0 <= idx < n:
+                return date_index[idx].strftime(fmt_str)
+            return ''
+        loc = plt.MultipleLocator(step)
+        for a in (self.ax, self.ax_vol, self.ax_kd):
+            a.xaxis.set_major_locator(loc)
+            a.xaxis.set_major_formatter(plt.FuncFormatter(fmt))
+
     def _on_xlim_change(self, ax):
         """縮放時自動調整刻度密度（不含 draw，由 scroll handler 處理）"""
         if getattr(self, '_in_xlim_change', False) or self._last_df is None:
@@ -619,26 +650,7 @@ class StockApp:
         self._in_xlim_change = True
         try:
             xmin, xmax = ax.get_xlim()
-            span = xmax - xmin
-            if span <= 30:
-                step = 1
-            elif span <= 90:
-                step = 5
-            elif span <= 365:
-                step = 20
-            else:
-                step = 60
-            date_index = getattr(self, '_date_index', self._last_df.index)
-            n = len(date_index)
-            def fmt(x, pos):
-                idx = int(round(x))
-                if 0 <= idx < n:
-                    return date_index[idx].strftime('%Y/%m')
-                return ''
-            loc = plt.MultipleLocator(step)
-            for a in (self.ax, self.ax_vol, self.ax_kd):
-                a.xaxis.set_major_locator(loc)
-                a.xaxis.set_major_formatter(plt.FuncFormatter(fmt))
+            self._apply_date_axis(xmin, xmax)
         finally:
             self._in_xlim_change = False
 
@@ -651,23 +663,9 @@ class StockApp:
         future_dates = pd.bdate_range(start=last_date + pd.Timedelta(days=1), periods=pred_days)
         self._date_index = df.index.append(future_dates)
 
-        # 重新設定X軸刻度（含未來日期）
-        n_total = len(self._date_index)
-        if pred_days <= 30:
-            step = 1
-        elif pred_days <= 90:
-            step = 5
-        else:
-            step = 20
-        def _fmt_date(x, pos):
-            idx = int(round(x))
-            if 0 <= idx < n_total:
-                return self._date_index[idx].strftime('%Y/%m')
-            return ''
-        loc = plt.MultipleLocator(step)
-        for a in (self.ax, self.ax_vol, self.ax_kd):
-            a.xaxis.set_major_locator(loc)
-            a.xaxis.set_major_formatter(plt.FuncFormatter(_fmt_date))
+        # 自適應日期格式（含預測區域）
+        total = len(self._date_index)
+        self._apply_date_axis(-0.5, total - 0.5)
 
         method = self.pred_method.get()
         if method == "全部":
@@ -1761,28 +1759,11 @@ class StockApp:
         self.ax_kd.legend(fontsize=9, loc='upper right', facecolor='#0d1117',
                           edgecolor='#555555', labelcolor=self._text_color)
 
-        # X軸設定（數值位置，避免休市日空白，顯示年月）
+        # X軸設定（數值位置，避免休市日空白，顯示日期）
         self.ax_kd.set_xlabel("日期", fontsize=10, color=self._text_color)
         self._set_xlim_all(-0.5, len(df) - 0.5)
-        # 設定X軸刻度顯示年月
-        n = len(self._date_index)
-        def _fmt_date(x, pos):
-            idx = int(round(x))
-            if 0 <= idx < n:
-                return self._date_index[idx].strftime('%Y/%m')
-            return ''
-        if n <= 30:
-            step = 1
-        elif n <= 90:
-            step = 5
-        elif n <= 365:
-            step = 20
-        else:
-            step = 60
-        loc = plt.MultipleLocator(step)
-        for a in (self.ax, self.ax_vol, self.ax_kd):
-            a.xaxis.set_major_locator(loc)
-            a.xaxis.set_major_formatter(plt.FuncFormatter(_fmt_date))
+        # 自適應日期格式
+        self._apply_date_axis(-0.5, len(df) - 0.5)
 
         # 未來趨勢預測
         try:

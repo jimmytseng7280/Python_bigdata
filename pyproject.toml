@@ -20,3 +20,8 @@ dependencies = [
     "twstock>=1.5.1",
     "yfinance>=1.5.1",
 ]
+
+[tool.uv.workspace]
+members = [
+    "HW07_18",
+]
