@@ -400,7 +400,7 @@ class _NpyLSTM:
         return h, c
 
 
-def _dl_train_lstm(close_arr, pred_days, seq_len=30, hidden=32, epochs=80, lr=0.005):
+def _dl_train_lstm(close_arr, pred_days, seq_len=30, hidden=16, epochs=30, lr=0.005):
     """訓練 LSTM 並預測未來天數，回傳預測陣列"""
     norm, mu, sigma = _dl_normalize(close_arr)
     if len(norm) < seq_len + 5:
@@ -473,7 +473,7 @@ class _NpyGRU:
         return h
 
 
-def _dl_train_gru(close_arr, pred_days, seq_len=30, hidden=32, epochs=80, lr=0.005):
+def _dl_train_gru(close_arr, pred_days, seq_len=30, hidden=16, epochs=30, lr=0.005):
     """訓練 GRU 並預測未來天數"""
     norm, mu, sigma = _dl_normalize(close_arr)
     if len(norm) < seq_len + 5:
@@ -513,7 +513,7 @@ def _dl_train_gru(close_arr, pred_days, seq_len=30, hidden=32, epochs=80, lr=0.0
 
 # ── Transformer（簡化版） ──
 
-def _dl_train_transformer(close_arr, pred_days, seq_len=30, d_model=32, n_heads=4, epochs=80, lr=0.003):
+def _dl_train_transformer(close_arr, pred_days, seq_len=30, d_model=16, n_heads=4, epochs=30, lr=0.003):
     """純 numpy Transformer 預測模型"""
     norm, mu, sigma = _dl_normalize(close_arr)
     if len(norm) < seq_len + 5:
@@ -665,7 +665,7 @@ class StockApp:
         # 預測值區：用 tk.Text 支援多色文字，依線圖顏色顯示
         self.pred_frame = ttk.Frame(root)
         self.pred_frame.pack(fill=tk.X, padx=10, pady=(0, 2))
-        self.pred_text_widget = tk.Text(self.pred_frame, height=1, wrap=tk.WORD,
+        self.pred_text_widget = tk.Text(self.pred_frame, height=3, wrap=tk.WORD,
                                         bg='#0d1117', fg='#e0e0e0', font=(_CHINESE_FONT, 10),
                                         borderwidth=0, highlightthickness=0, padx=8, pady=4)
         self.pred_text_widget.pack(fill=tk.X)
@@ -933,7 +933,7 @@ class StockApp:
         items: [(name, value, color_hex), ...]
         """
         S0 = self._last_df['Close'].values[-1] if self._last_df is not None else 0
-        self.pred_text_widget.config(state=tk.NORMAL)
+        self.pred_text_widget.config(state=tk.NORMAL, height=min(len(items) + 1, 6))
         self.pred_text_widget.delete('1.0', tk.END)
 
         header = f'目前股價: {S0:.2f}  |  預測{pred_days}日  |  方法: {self.pred_method.get()}\n'
@@ -1240,28 +1240,6 @@ class StockApp:
         if tf_pred is not None:
             final_values.append(('TF', tf_pred[-1], '#5c6bc0'))
         final_values.sort(key=lambda x: x[1], reverse=True)
-
-        # 在圖表上用 matplotlib annotate 標註最終值（曲線末端）
-        S0 = y[-1]
-        y_range = max(v for _, v, _ in final_values) - min(v for _, v, _ in final_values) if len(final_values) > 1 else 10
-        gap = y_range * 0.03 if y_range > 0 else 5
-        used_positions = []
-        for idx, (name, val, clr) in enumerate(final_values):
-            display_y = val
-            for uy in used_positions:
-                if abs(display_y - uy) < gap:
-                    display_y = uy + gap
-            used_positions.append(display_y)
-            pct = (val - S0) / S0 * 100
-            arrow = '+' if pct > 0 else ''
-            label = f'{name} {val:.2f} ({arrow}{pct:.1f}%)'
-            self.ax.annotate(
-                label, xy=(n + pred_days - 1, val),
-                xytext=(8, 0), textcoords='offset points',
-                fontsize=6.5, color=clr, fontfamily=_CHINESE_FONT, fontweight='bold',
-                verticalalignment='center',
-                bbox=dict(boxstyle='round,pad=0.15', facecolor='#0d1117', edgecolor=clr, alpha=0.95, linewidth=0.7),
-                clip_on=False, zorder=30)
 
         self.ax.legend(handles=legend_handles, fontsize=7, loc='lower right',
                        facecolor='#0d1117', edgecolor='#555555', labelcolor='#e0e0e0', ncol=3)
@@ -1632,7 +1610,7 @@ class StockApp:
         split = max(int(len(X_clean) * 0.85), len(X_clean) - 10)
         scaler = StandardScaler()
         X_scaled = scaler.fit_transform(X_clean)
-        model = XGBRegressor(n_estimators=200, max_depth=4, learning_rate=0.05,
+        model = XGBRegressor(n_estimators=100, max_depth=4, learning_rate=0.05,
                              random_state=42, n_jobs=-1, verbosity=0)
         model.fit(X_scaled[:split], y_clean[:split])
         # 遞迴多步預測（使用 raw 特徵空間避免縮放混亂）
@@ -1663,7 +1641,7 @@ class StockApp:
             return None, None
         return np.array(preds), 'XGBoost'
 
-    def _calc_rf_prediction(self, df, pred_days, n_estimators=200):
+    def _calc_rf_prediction(self, df, pred_days, n_estimators=100):
         """使用隨機森林搭配技術指標進行多步預測"""
         from sklearn.ensemble import RandomForestRegressor
         from sklearn.preprocessing import StandardScaler
@@ -1761,28 +1739,28 @@ class StockApp:
     def _calc_lgb_prediction(self, df, pred_days):
         """LightGBM 預測"""
         from lightgbm import LGBMRegressor
-        model = LGBMRegressor(n_estimators=200, max_depth=4, learning_rate=0.05,
+        model = LGBMRegressor(n_estimators=100, max_depth=4, learning_rate=0.05,
                               random_state=42, n_jobs=-1, verbose=-1)
         return self._calc_model_prediction(df, pred_days, model, 'LightGBM')
 
     def _calc_cb_prediction(self, df, pred_days):
         """CatBoost 預測"""
         from catboost import CatBoostRegressor
-        model = CatBoostRegressor(n_estimators=200, max_depth=4, learning_rate=0.05,
+        model = CatBoostRegressor(n_estimators=100, max_depth=4, learning_rate=0.05,
                                   random_state=42, verbose=0, allow_writing_files=False)
         return self._calc_model_prediction(df, pred_days, model, 'CatBoost')
 
     def _calc_gb_prediction(self, df, pred_days):
         """Gradient Boosting 預測"""
         from sklearn.ensemble import GradientBoostingRegressor
-        model = GradientBoostingRegressor(n_estimators=200, max_depth=4, learning_rate=0.05,
+        model = GradientBoostingRegressor(n_estimators=100, max_depth=4, learning_rate=0.05,
                                           random_state=42)
         return self._calc_model_prediction(df, pred_days, model, 'GBoost')
 
     def _calc_et_prediction(self, df, pred_days):
         """Extra Trees 預測"""
         from sklearn.ensemble import ExtraTreesRegressor
-        model = ExtraTreesRegressor(n_estimators=200, max_depth=6, random_state=42, n_jobs=-1)
+        model = ExtraTreesRegressor(n_estimators=100, max_depth=6, random_state=42, n_jobs=-1)
         return self._calc_model_prediction(df, pred_days, model, 'ExtraTree')
 
     def _calc_stacking_prediction(self, df, pred_days):
@@ -1794,11 +1772,11 @@ class StockApp:
         from catboost import CatBoostRegressor
         from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor
         estimators = [
-            ('xgb', XGBRegressor(n_estimators=100, max_depth=3, random_state=42, verbosity=0)),
-            ('rf', RandomForestRegressor(n_estimators=100, max_depth=4, random_state=42, n_jobs=-1)),
-            ('lgb', LGBMRegressor(n_estimators=100, max_depth=3, random_state=42, verbose=-1)),
-            ('cb', CatBoostRegressor(n_estimators=100, max_depth=3, random_state=42, verbose=0, allow_writing_files=False)),
-            ('gb', GradientBoostingRegressor(n_estimators=100, max_depth=3, random_state=42)),
+            ('xgb', XGBRegressor(n_estimators=50, max_depth=3, random_state=42, verbosity=0)),
+            ('rf', RandomForestRegressor(n_estimators=50, max_depth=4, random_state=42, n_jobs=-1)),
+            ('lgb', LGBMRegressor(n_estimators=50, max_depth=3, random_state=42, verbose=-1)),
+            ('cb', CatBoostRegressor(n_estimators=50, max_depth=3, random_state=42, verbose=0, allow_writing_files=False)),
+            ('gb', GradientBoostingRegressor(n_estimators=50, max_depth=3, random_state=42)),
         ]
         model = StackingRegressor(estimators=estimators, final_estimator=Ridge(alpha=1.0), n_jobs=-1)
         return self._calc_model_prediction(df, pred_days, model, 'Stacking')
