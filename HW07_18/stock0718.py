@@ -928,6 +928,32 @@ class StockApp:
         finally:
             self._in_xlim_change = False
 
+    def _update_pred_text(self, items, pred_days):
+        """用 tk.Text 依線圖顏色顯示預測值
+        items: [(name, value, color_hex), ...]
+        """
+        S0 = self._last_df['Close'].values[-1] if self._last_df is not None else 0
+        self.pred_text_widget.config(state=tk.NORMAL)
+        self.pred_text_widget.delete('1.0', tk.END)
+
+        header = f'目前股價: {S0:.2f}  |  預測{pred_days}日  |  方法: {self.pred_method.get()}\n'
+        self.pred_text_widget.insert(tk.END, header)
+        self.pred_text_widget.tag_add('header', '1.0', '1.end')
+        self.pred_text_widget.tag_config('header', foreground='#e0e0e0', font=(_CHINESE_FONT, 10, 'bold'))
+
+        for i, (name, val, clr) in enumerate(items):
+            pct = (val - S0) / S0 * 100
+            arrow = '▲' if pct > 0 else '▼' if pct < 0 else '─'
+            tag = f'line_{i}'
+            self.pred_text_widget.insert(tk.END, f'  {name}: {val:.2f}  ({arrow}{pct:+.2f}%)  ')
+            self.pred_text_widget.tag_config(tag, foreground=clr, font=(_CHINESE_FONT, 10, 'bold'))
+            # 把顏色套用到這一行
+            line_start = self.pred_text_widget.index(f'end - 1c - {len(f"  {name}: {val:.2f}  ({arrow}{pct:+.2f}%)  ")}c')
+            line_end = self.pred_text_widget.index('end - 1c')
+            self.pred_text_widget.tag_add(tag, line_start, line_end)
+
+        self.pred_text_widget.config(state=tk.DISABLED)
+
 
 
     def _draw_prediction(self, df, close, pred_days):
@@ -979,17 +1005,33 @@ class StockApp:
         else:
             self._pred_bollinger(df, close, pred_days)
 
-        # ===== 單一方法的 tkinter 預測值面板 =====
+        # ===== 單一方法：從 legend 取值，依線圖顏色顯示 =====
         if method != "全部":
+            method_color_map = {
+                '線性': '#888888', '多項式': '#ff9800', '蒙地卡羅': '#bb86fc',
+                '指數平滑': '#00bcd4', 'MA交叉': '#4caf50', '布林通道': '#e040fb',
+                'XGBoost': '#ff6b6b', '隨機森林': '#4fc3f7', 'LightGBM': '#ffd700',
+                'CatBoost': '#ff69b4', 'GBoost': '#00ffff', 'ExtraTree': '#32cd32',
+                'Stacking': '#ff4500', 'LSTM': '#00897b', 'GRU': '#c2185b',
+                'Transformer': '#5c6bc0', 'AI預測': '#ff6b6b',
+            }
             S0 = close.values[-1]
-            lines = []
-            lines.append(f'目前股價: {S0:.2f}  |  預測天數: {pred_days}日  |  方法: {method}')
-            lines.append('─' * 50)
+            items = []
             legend = self.ax.get_legend()
             if legend is not None:
                 for text in legend.get_texts():
-                    lines.append(f'  {text.get_text()}')
-            self.pred_text.set('\n'.join(lines))
+                    lbl = text.get_text()
+                    clr = method_color_map.get(method, '#e0e0e0')
+                    # 從 legend 文字中提取數值
+                    parts = lbl.split()
+                    try:
+                        val = float(parts[-1])
+                    except ValueError:
+                        val = S0
+                    items.append((method, val, clr))
+            if not items:
+                items = [(method, S0, '#e0e0e0')]
+            self._update_pred_text(items, pred_days)
 
     def _pred_all(self, df, close, pred_days):
         """同時顯示全部預測方法"""
@@ -1224,15 +1266,8 @@ class StockApp:
         self.ax.legend(handles=legend_handles, fontsize=7, loc='lower right',
                        facecolor='#0d1117', edgecolor='#555555', labelcolor='#e0e0e0', ncol=3)
 
-        # ===== 用 tkinter 面板顯示預測值（100% 可靠）=====
-        lines = []
-        lines.append(f'目前股價: {S0:.2f}  |  預測天數: {pred_days}日  |  方法: {self.pred_method.get()}')
-        lines.append('─' * 80)
-        for name, val, clr in final_values:
-            pct = (val - S0) / S0 * 100
-            arrow = '▲' if pct > 0 else '▼' if pct < 0 else '─'
-            lines.append(f'  {name:>8s}: {val:>10.2f}  {arrow} {pct:>+7.2f}%')
-        self.pred_text.set('\n'.join(lines))
+        # 用 tkinter Text 依線圖顏色顯示預測值
+        self._update_pred_text(final_values, pred_days)
 
     def _pred_linear(self, df, close, pred_days):
         """線性回歸預測"""
@@ -2023,7 +2058,10 @@ class StockApp:
             messagebox.showerror("錯誤", f"股票 {query} 無資料，可能代碼錯誤或已下市。")
             self.btn.config(state=tk.NORMAL, text="查詢")
             self.info_text.set("")
-            self.pred_text.set("查詢後自動預測...")
+            self.pred_text_widget.config(state=tk.NORMAL)
+            self.pred_text_widget.delete('1.0', tk.END)
+            self.pred_text_widget.insert('1.0', '查詢後自動預測...')
+            self.pred_text_widget.config(state=tk.DISABLED)
             return
 
         name = fetch_chinese_name(symbol) or info.get('longName') or info.get('shortName') or ''
