@@ -340,6 +340,261 @@ def fetch_data(symbol, start_date=None, end_date=None):
             return sym, df, info, avg_price
     return symbol, pd.DataFrame(), {}, None
 
+
+# ═══════════════════════════════════════════════════════════════
+# 深度學習模型（純 numpy 實作，無需 PyTorch / TensorFlow）
+# ═══════════════════════════════════════════════════════════════
+
+def _dl_sigmoid(x):
+    x = np.clip(x, -500, 500)
+    return 1.0 / (1.0 + np.exp(-x))
+
+def _dl_tanh(x):
+    return np.tanh(np.clip(x, -500, 500))
+
+def _dl_relu(x):
+    return np.maximum(0, x)
+
+def _dl_normalize(data):
+    mu, sigma = np.mean(data), np.std(data)
+    if sigma < 1e-8:
+        sigma = 1.0
+    return (data - mu) / sigma, mu, sigma
+
+def _dl_create_sequences(data, seq_len):
+    X, y = [], []
+    for i in range(len(data) - seq_len):
+        X.append(data[i:i+seq_len])
+        y.append(data[i+seq_len])
+    return np.array(X), np.array(y)
+
+
+# ── LSTM ──
+
+class _NpyLSTM:
+    """純 numpy LSTM 單元"""
+    def __init__(self, input_size, hidden_size):
+        scale = np.sqrt(2.0 / (input_size + hidden_size))
+        self.Wf = np.random.randn(hidden_size, input_size + hidden_size) * scale
+        self.bf = np.zeros((hidden_size, 1))
+        self.Wi = np.random.randn(hidden_size, input_size + hidden_size) * scale
+        self.bi = np.zeros((hidden_size, 1))
+        self.Wc = np.random.randn(hidden_size, input_size + hidden_size) * scale
+        self.bc = np.zeros((hidden_size, 1))
+        self.Wo = np.random.randn(hidden_size, input_size + hidden_size) * scale
+        self.bo = np.zeros((hidden_size, 1))
+        self.hidden_size = hidden_size
+
+    def forward(self, x_seq):
+        h = np.zeros((self.hidden_size, 1))
+        c = np.zeros((self.hidden_size, 1))
+        for t in range(x_seq.shape[1]):
+            xt = x_seq[:, t:t+1]
+            concat = np.vstack([h, xt])
+            f = _dl_sigmoid(self.Wf @ concat + self.bf)
+            i = _dl_sigmoid(self.Wi @ concat + self.bi)
+            c_hat = _dl_tanh(self.Wc @ concat + self.bc)
+            o = _dl_sigmoid(self.Wo @ concat + self.bo)
+            c = f * c + i * c_hat
+            h = o * _dl_tanh(c)
+        return h, c
+
+
+def _dl_train_lstm(close_arr, pred_days, seq_len=30, hidden=32, epochs=80, lr=0.005):
+    """訓練 LSTM 並預測未來天數，回傳預測陣列"""
+    norm, mu, sigma = _dl_normalize(close_arr)
+    if len(norm) < seq_len + 5:
+        return None
+    X, y = _dl_create_sequences(norm, seq_len)
+    if len(X) < 10:
+        return None
+    n_feat = 1
+    lstm = _NpyLSTM(n_feat, hidden)
+    # 輸出層
+    Wo = np.random.randn(1, hidden) * np.sqrt(2.0 / hidden)
+    bo = np.zeros((1, 1))
+
+    for epoch in range(epochs):
+        perm = np.random.permutation(len(X))
+        total_loss = 0
+        for idx in perm:
+            xi = X[idx].reshape(n_feat, seq_len)
+            yi = y[idx]
+            h, c = lstm.forward(xi)
+            pred_val = (Wo @ h + bo).item()
+            loss = (pred_val - yi) ** 2
+            total_loss += loss
+            d_out = 2 * (pred_val - yi) / len(X)
+            dWo = d_out * h.T
+            dbo = np.array([[d_out]])
+            # 簡化梯度更新（直接更新）
+            Wo -= lr * dWo
+            bo -= lr * dbo
+        if epoch % 20 == 0:
+            avg = total_loss / len(X)
+
+    # 遞迴預測
+    seq = list(norm[-seq_len:])
+    preds = []
+    for _ in range(pred_days):
+        xi = np.array(seq[-seq_len:]).reshape(n_feat, seq_len)
+        h, c = lstm.forward(xi)
+        p = (Wo @ h + bo).item()
+        preds.append(p)
+        seq.append(p)
+    preds = np.array(preds) * sigma + mu
+    return preds
+
+
+# ── GRU ──
+
+class _NpyGRU:
+    """純 numpy GRU 單元"""
+    def __init__(self, input_size, hidden_size):
+        scale = np.sqrt(2.0 / (input_size + hidden_size))
+        self.Wz = np.random.randn(hidden_size, input_size + hidden_size) * scale
+        self.bz = np.zeros((hidden_size, 1))
+        self.Wr = np.random.randn(hidden_size, input_size + hidden_size) * scale
+        self.br = np.zeros((hidden_size, 1))
+        self.Wh = np.random.randn(hidden_size, input_size + hidden_size) * scale
+        self.bh = np.zeros((hidden_size, 1))
+        self.hidden_size = hidden_size
+
+    def forward(self, x_seq):
+        h = np.zeros((self.hidden_size, 1))
+        for t in range(x_seq.shape[1]):
+            xt = x_seq[:, t:t+1]
+            concat = np.vstack([h, xt])
+            z = _dl_sigmoid(self.Wz @ concat + self.bz)
+            r = _dl_sigmoid(self.Wr @ concat + self.br)
+            concat_r = np.vstack([r * h, xt])
+            h_hat = _dl_tanh(self.Wh @ concat_r + self.bh)
+            h = (1 - z) * h + z * h_hat
+        return h
+
+
+def _dl_train_gru(close_arr, pred_days, seq_len=30, hidden=32, epochs=80, lr=0.005):
+    """訓練 GRU 並預測未來天數"""
+    norm, mu, sigma = _dl_normalize(close_arr)
+    if len(norm) < seq_len + 5:
+        return None
+    X, y = _dl_create_sequences(norm, seq_len)
+    if len(X) < 10:
+        return None
+    n_feat = 1
+    gru = _NpyGRU(n_feat, hidden)
+    Wo = np.random.randn(1, hidden) * np.sqrt(2.0 / hidden)
+    bo = np.zeros((1, 1))
+
+    for epoch in range(epochs):
+        perm = np.random.permutation(len(X))
+        total_loss = 0
+        for idx in perm:
+            xi = X[idx].reshape(n_feat, seq_len)
+            yi = y[idx]
+            h = gru.forward(xi)
+            pred_val = (Wo @ h + bo).item()
+            loss = (pred_val - yi) ** 2
+            total_loss += loss
+            d_out = 2 * (pred_val - yi) / len(X)
+            Wo -= lr * d_out * h.T
+            bo -= lr * np.array([[d_out]])
+
+    seq = list(norm[-seq_len:])
+    preds = []
+    for _ in range(pred_days):
+        xi = np.array(seq[-seq_len:]).reshape(n_feat, seq_len)
+        h = gru.forward(xi)
+        p = (Wo @ h + bo).item()
+        preds.append(p)
+        seq.append(p)
+    return np.array(preds) * sigma + mu
+
+
+# ── Transformer（簡化版） ──
+
+def _dl_train_transformer(close_arr, pred_days, seq_len=30, d_model=32, n_heads=4, epochs=80, lr=0.003):
+    """純 numpy Transformer 預測模型"""
+    norm, mu, sigma = _dl_normalize(close_arr)
+    if len(norm) < seq_len + 5:
+        return None
+    X, y = _dl_create_sequences(norm, seq_len)
+    if len(X) < 10:
+        return None
+    n_feat = 1
+    head_dim = d_model // n_heads
+
+    # 權重
+    scale = np.sqrt(2.0 / (n_feat + d_model))
+    Wq = np.random.randn(d_model, n_feat) * scale
+    Wk = np.random.randn(d_model, n_feat) * scale
+    Wv = np.random.randn(d_model, n_feat) * scale
+    Wo_attn = np.random.randn(d_model, d_model) * scale
+    # FFN
+    W1 = np.random.randn(d_model * 4, d_model) * np.sqrt(2.0 / d_model)
+    b1 = np.zeros((d_model * 4, 1))
+    W2 = np.random.randn(d_model, d_model * 4) * np.sqrt(2.0 / (d_model * 4))
+    b2 = np.zeros((d_model, 1))
+    # 位置編碼
+    pos_enc = np.random.randn(seq_len, d_model) * 0.02
+    # 輸出
+    Wout = np.random.randn(1, d_model) * np.sqrt(2.0 / d_model)
+    bout = np.zeros((1, 1))
+
+    def _forward(xi):
+        seq = xi.T + pos_enc[:xi.shape[1]]  # (seq_len, n_feat) -> broadcast
+        Q = Wq @ xi + pos_enc[:xi.shape[1]].T  # (d_model, seq_len)
+        K = Wk @ xi + pos_enc[:xi.shape[1]].T
+        V = Wv @ xi
+        # 簡化注意力（不用分頭）
+        scale_factor = np.sqrt(head_dim)
+        attn = Q.T @ K / scale_factor  # (seq_len, seq_len)
+        attn = np.exp(attn - np.max(attn, axis=-1, keepdims=True))
+        attn = attn / (np.sum(attn, axis=-1, keepdims=True) + 1e-8)
+        out = (attn @ V.T).T  # (d_model, seq_len)
+        out = Wo_attn @ out
+        out = _dl_relu(out)
+        # 取最後一個時間步
+        last = out[:, -1:]  # (d_model, 1)
+        # FFN
+        ff = _dl_relu(W1 @ last + b1)
+        ff = W2 @ ff + b2
+        last = last + ff  # residual
+        return Wout @ last + bout
+
+    for epoch in range(epochs):
+        perm = np.random.permutation(len(X))
+        for idx in perm:
+            xi = X[idx].reshape(n_feat, seq_len)
+            yi = y[idx]
+            pred_val = _forward(xi).item()
+            d_out = 2 * (pred_val - yi) / len(X) * lr
+            # 簡化：直接微調輸出層
+            Wout -= d_out * (_forward(xi).item() * 0.01)
+            bout -= np.array([[d_out]])
+
+    seq = list(norm[-seq_len:])
+    preds = []
+    for _ in range(pred_days):
+        xi = np.array(seq[-seq_len:]).reshape(n_feat, seq_len)
+        p = _forward(xi).item()
+        preds.append(p)
+        seq.append(p)
+    return np.array(preds) * sigma + mu
+
+
+def calc_dl_prediction(df, model_type='lstm', pred_days=20):
+    """統一深度學習預測入口"""
+    close = df['Close'].values.astype(float)
+    if model_type == 'lstm':
+        return _dl_train_lstm(close, pred_days)
+    elif model_type == 'gru':
+        return _dl_train_gru(close, pred_days)
+    elif model_type == 'transformer':
+        return _dl_train_transformer(close, pred_days)
+    return None
+
+
 class StockApp:
     """臺灣股市查詢系統主視窗"""
 
