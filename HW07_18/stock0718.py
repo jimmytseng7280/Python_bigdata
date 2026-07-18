@@ -662,20 +662,31 @@ class StockApp:
         ttk.Label(self.info_frame, textvariable=self.info_text,
                   font=(_CHINESE_FONT, 11)).pack(padx=10, pady=8)
 
+        # 預測值區：用 tk.Text 支援多色文字，依線圖顏色顯示
+        self.pred_frame = ttk.Frame(root)
+        self.pred_frame.pack(fill=tk.X, padx=10, pady=(0, 2))
+        self.pred_text_widget = tk.Text(self.pred_frame, height=1, wrap=tk.WORD,
+                                        bg='#0d1117', fg='#e0e0e0', font=(_CHINESE_FONT, 10),
+                                        borderwidth=0, highlightthickness=0, padx=8, pady=4)
+        self.pred_text_widget.pack(fill=tk.X)
+        self.pred_text_widget.insert('1.0', '查詢後自動預測...')
+        self.pred_text_widget.config(state=tk.DISABLED)
+        # 定義顏色標籤（與線圖顏色對應）
+        self._pred_tag_colors = {
+            'linear': '#888888', 'poly': '#ff9800', 'mc': '#bb86fc',
+            'es': '#00bcd4', 'ma': '#4caf50', 'boll': '#e040fb',
+            'xgb': '#2196f3', 'rf': '#ff5722', 'lgb': '#8bc34a',
+            'cb': '#ff9800', 'gb': '#00897b', 'et': '#32cd32',
+            'st': '#ff4500', 'lstm': '#00897b', 'gru': '#c2185b',
+            'tf': '#5c6bc0',
+        }
+
         # 相關係數區：顯示前五名高相關股票
         self.corr_frame = ttk.LabelFrame(root, text="日報酬率相關係數 Top 5")
         self.corr_frame.pack(fill=tk.X, padx=10, pady=(0, 5))
 
         self.corr_text = tk.StringVar(value="查詢後自動計算...")
         ttk.Label(self.corr_frame, textvariable=self.corr_text,
-                  font=(_CHINESE_FONT, 10), justify=tk.LEFT).pack(padx=10, pady=6, anchor=tk.W)
-
-        # 預測值區：顯示各方法預測結果
-        self.pred_frame = ttk.LabelFrame(root, text="預測值")
-        self.pred_frame.pack(fill=tk.X, padx=10, pady=(0, 5))
-
-        self.pred_text = tk.StringVar(value="查詢後自動預測...")
-        ttk.Label(self.pred_frame, textvariable=self.pred_text,
                   font=(_CHINESE_FONT, 10), justify=tk.LEFT).pack(padx=10, pady=6, anchor=tk.W)
 
         # 旋轉動畫狀態
