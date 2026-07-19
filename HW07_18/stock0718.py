@@ -666,8 +666,8 @@ class StockApp:
         self.pred_frame = ttk.Frame(root)
         self.pred_frame.pack(fill=tk.X, padx=10, pady=(0, 2))
         self.pred_text_widget = tk.Text(self.pred_frame, height=3, wrap=tk.WORD,
-                                        bg='#0d1117', fg='#e0e0e0', font=(_CHINESE_FONT, 10),
-                                        borderwidth=0, highlightthickness=0, padx=8, pady=4)
+                                        bg='#ffffff', fg='#333333', font=(_CHINESE_FONT, 10),
+                                        borderwidth=1, relief='solid', padx=8, pady=4)
         self.pred_text_widget.pack(fill=tk.X)
         self.pred_text_widget.insert('1.0', '查詢後自動預測...')
         self.pred_text_widget.config(state=tk.DISABLED)
@@ -680,6 +680,13 @@ class StockApp:
             'st': '#ff4500', 'lstm': '#00897b', 'gru': '#c2185b',
             'tf': '#5c6bc0',
         }
+
+        # 「全部」模式預測狀態（背景執行緒 + 即時顯示用）
+        self._pred_generation = 0       # 遞增計數器，使舊執行緒自動失效
+        self._pred_spinner_running = False
+        self._pred_spinner_idx = 0
+        self._pred_done_count = 0
+        self._pred_total_count = 0
 
         # 相關係數區：顯示前五名高相關股票
         self.corr_frame = ttk.LabelFrame(root, text="日報酬率相關係數 Top 5")
@@ -939,7 +946,7 @@ class StockApp:
         header = f'目前股價: {S0:.2f}  |  預測{pred_days}日  |  方法: {self.pred_method.get()}\n'
         self.pred_text_widget.insert(tk.END, header)
         self.pred_text_widget.tag_add('header', '1.0', '1.end')
-        self.pred_text_widget.tag_config('header', foreground='#e0e0e0', font=(_CHINESE_FONT, 10, 'bold'))
+        self.pred_text_widget.tag_config('header', foreground='#333333', font=(_CHINESE_FONT, 10, 'bold'))
 
         for i, (name, val, clr) in enumerate(items):
             pct = (val - S0) / S0 * 100
@@ -954,7 +961,86 @@ class StockApp:
 
         self.pred_text_widget.config(state=tk.DISABLED)
 
+    def _init_pred_text_spinner(self, pred_days):
+        """初始化預測文字框：標頭 + 底部旋轉動畫行"""
+        S0 = self._last_df['Close'].values[-1] if self._last_df is not None else 0
+        self.pred_text_widget.config(state=tk.NORMAL, height=3)
+        self.pred_text_widget.delete('1.0', tk.END)
+        header = f'目前股價: {S0:.2f}  |  預測{pred_days}日  |  方法: 全部\n'
+        self.pred_text_widget.insert(tk.END, header)
+        self.pred_text_widget.tag_add('header', '1.0', '1.end')
+        self.pred_text_widget.tag_config('header', foreground='#333333', font=(_CHINESE_FONT, 10, 'bold'))
+        # 旋轉動畫行（固定在最後一行）
+        self.pred_text_widget.insert(tk.END, '  ⠋ 正在計算預測... 0/16\n')
+        self.pred_text_widget.tag_config('spin', foreground='#888888', font=(_CHINESE_FONT, 9))
+        self.pred_text_widget.tag_add('spin', 'end - 2l', 'end - 1c')
+        self.pred_text_widget.config(state=tk.DISABLED)
+        self._pred_spinner_running = True
+        self._pred_spinner_idx = 0
+        self._tick_pred_spinner()
 
+    def _tick_pred_spinner(self):
+        """每 100ms 更新旋轉動畫行（只替換最後一行的文字）"""
+        if not self._pred_spinner_running:
+            return
+        ch = self._SPIN_FRAMES[self._pred_spinner_idx % len(self._SPIN_FRAMES)]
+        done = self._pred_done_count
+        total = self._pred_total_count
+        spin_text = f'  {ch} 正在計算預測... {done}/{total}'
+        self.pred_text_widget.config(state=tk.NORMAL)
+        # 刪除舊的旋轉行（最後一行）
+        self.pred_text_widget.delete('end - 2l', 'end - 1c')
+        # 插入新的旋轉行
+        self.pred_text_widget.insert(tk.END, spin_text + '\n')
+        self.pred_text_widget.tag_config('spin', foreground='#888888', font=(_CHINESE_FONT, 9))
+        self.pred_text_widget.tag_add('spin', 'end - 2l', 'end - 1c')
+        self.pred_text_widget.config(state=tk.DISABLED)
+        self._pred_spinner_idx += 1
+        self.root.after(100, self._tick_pred_spinner)
+
+    def _stop_pred_spinner(self):
+        """停止旋轉動畫"""
+        self._pred_spinner_running = False
+
+    def _append_pred_text_item(self, name, val, color, S0):
+        """在旋轉行之前插入一行彩色預測結果（即時顯示用）"""
+        pct = (val - S0) / S0 * 100 if S0 else 0
+        arrow = '▲' if pct > 0 else '▼' if pct < 0 else '─'
+        line_text = f'  {name}: {val:.2f}  ({arrow}{pct:+.2f}%)\n'
+        self.pred_text_widget.config(state=tk.NORMAL)
+        # 在旋轉行（最後一行）之前插入
+        insert_pos = 'end - 2c'
+        cur_line = int(self.pred_text_widget.index(insert_pos).split('.')[0])
+        tag = f'pred_{cur_line}'
+        self.pred_text_widget.insert(insert_pos, line_text)
+        self.pred_text_widget.tag_config(tag, foreground=color, font=(_CHINESE_FONT, 10, 'bold'))
+        self.pred_text_widget.tag_add(tag, f'{cur_line}.0', f'{cur_line}.end - 1c')
+        # 自動調整高度（上限 12 行）
+        new_lines = int(self.pred_text_widget.index('end-1c').split('.')[0])
+        self.pred_text_widget.config(height=min(max(new_lines, 3), 12))
+        self.pred_text_widget.config(state=tk.DISABLED)
+
+    def _finalize_pred_text(self, final_values, pred_days):
+        """所有方法完成後，重建文字框並依價格排序顯示最終結果"""
+        S0 = self._last_df['Close'].values[-1] if self._last_df is not None else 0
+        self._stop_pred_spinner()
+        final_values.sort(key=lambda x: x[1], reverse=True)
+        self.pred_text_widget.config(state=tk.NORMAL, height=min(len(final_values) + 2, 12))
+        self.pred_text_widget.delete('1.0', tk.END)
+        header = f'目前股價: {S0:.2f}  |  預測{pred_days}日  |  方法: 全部\n'
+        self.pred_text_widget.insert(tk.END, header)
+        self.pred_text_widget.tag_add('header', '1.0', '1.end')
+        self.pred_text_widget.tag_config('header', foreground='#333333', font=(_CHINESE_FONT, 10, 'bold'))
+        for i, (name, val, clr) in enumerate(final_values):
+            pct = (val - S0) / S0 * 100 if S0 else 0
+            arrow = '▲' if pct > 0 else '▼' if pct < 0 else '─'
+            tag = f'line_{i}'
+            line_text = f'  {name}: {val:.2f}  ({arrow}{pct:+.2f}%)\n'
+            self.pred_text_widget.insert(tk.END, line_text)
+            self.pred_text_widget.tag_config(tag, foreground=clr, font=(_CHINESE_FONT, 10, 'bold'))
+            line_no = i + 2
+            self.pred_text_widget.tag_add(tag, f'{line_no}.0', f'{line_no}.end')
+        self.pred_text_widget.config(state=tk.DISABLED)
 
     def _draw_prediction(self, df, close, pred_days):
         """根據選定方法預測未來走勢"""
@@ -1034,218 +1120,253 @@ class StockApp:
             self._update_pred_text(items, pred_days)
 
     def _pred_all(self, df, close, pred_days):
-        """同時顯示全部預測方法"""
+        """全部預測：背景執行緒依序計算，每完成一個方法立即畫線並在文字框顯示"""
         from matplotlib.lines import Line2D
         n = len(close)
         x = np.arange(n)
         y = close.values.astype(float)
         future_x = np.arange(n, n + pred_days)
-        legend_handles = []
-
-        # 1. 線性（灰色）
-        coeffs1 = np.polyfit(x, y, 1)
-        trend1 = np.polyval(coeffs1, x)
-        pred1 = np.polyval(coeffs1, future_x)
-        std1 = np.std(y - trend1)
-        self.ax.plot(future_x, pred1, color='#888888', linewidth=1.2, linestyle='--', alpha=0.8)
-        self.ax.fill_between(future_x, pred1 - std1, pred1 + std1, alpha=0.04, color='#888888')
-        legend_handles.append(Line2D([0], [0], color='#888888', linestyle='--', linewidth=1.2,
-                                     label=f'線性 {pred1[-1]:.2f}'))
-
-        # 2. 多項式（橙色）
-        c2 = np.polyfit(x, y, 2)
-        c3 = np.polyfit(x, y, 3)
-        pred2 = (np.polyval(c2, future_x) + np.polyval(c3, future_x)) / 2
-        std2 = np.std(y - np.polyval(c2, x))
-        self.ax.plot(future_x, pred2, color='#ff9800', linewidth=1.2, linestyle='--', alpha=0.8)
-        self.ax.fill_between(future_x, pred2 - std2, pred2 + std2, alpha=0.04, color='#ff9800')
-        legend_handles.append(Line2D([0], [0], color='#ff9800', linestyle='--', linewidth=1.2,
-                                     label=f'多項式 {pred2[-1]:.2f}'))
-
-        # 3. 蒙地卡羅（紫色）
-        returns = np.diff(y) / y[:-1]
-        mu, sigma = np.mean(returns), np.std(returns)
         S0 = y[-1]
-        sims = np.zeros((200, pred_days))
-        for i in range(200):
-            prices = [S0]
-            for _ in range(pred_days):
-                prices.append(prices[-1] * np.exp((mu - 0.5 * sigma**2) + sigma * np.random.normal()))
-            sims[i, :] = prices[1:]
-        mc_mean = np.mean(sims, axis=0)
-        for i in range(0, 200, 10):
-            self.ax.plot(future_x, sims[i], color='#bb86fc', linewidth=0.2, alpha=0.1)
-        self.ax.plot(future_x, mc_mean, color='#bb86fc', linewidth=1.5, linestyle='-')
-        mc_p5 = np.percentile(sims, 5, axis=0)
-        mc_p95 = np.percentile(sims, 95, axis=0)
-        self.ax.fill_between(future_x, mc_p5, mc_p95, alpha=0.06, color='#bb86fc')
-        up_prob = np.mean(sims[:, -1] > S0) * 100
-        legend_handles.append(Line2D([0], [0], color='#bb86fc', linewidth=1.5,
-                                     label=f'MC均值 {mc_mean[-1]:.2f}'))
 
-        # 4. 指數平滑（青色）
-        alpha_es, beta_es = 0.3, 0.1
-        level = [y[0]]
-        trend_v = [y[1] - y[0] if n > 1 else 0]
-        for t in range(1, n):
-            new_level = alpha_es * y[t] + (1 - alpha_es) * (level[-1] + trend_v[-1])
-            new_trend = beta_es * (new_level - level[-1]) + (1 - beta_es) * trend_v[-1]
-            level.append(new_level)
-            trend_v.append(new_trend)
-        pred4 = [level[-1] + (i + 1) * trend_v[-1] for i in range(pred_days)]
-        self.ax.plot(future_x, pred4, color='#00bcd4', linewidth=1.2, linestyle='--', alpha=0.8)
-        legend_handles.append(Line2D([0], [0], color='#00bcd4', linestyle='--', linewidth=1.2,
-                                     label=f'指數平滑 {pred4[-1]:.2f}'))
+        # 遞增 generation，使之前的舊執行緒自動失效
+        gen = self._pred_generation
+        self._pred_generation += 1
 
-        # 5. MA交叉（綠/紅）
-        ma5 = np.convolve(y, np.ones(5)/5, mode='valid')
-        ma10 = np.convolve(y, np.ones(10)/10, mode='valid')
-        latest_diff = ma5[-1] - ma10[-1]
-        if len(ma5) >= 5:
-            slope = np.polyfit(np.arange(5), ma5[-5:], 1)[0]
-        else:
-            slope = latest_diff / max(len(ma5), 1)
-        pred5 = [S0 + slope * (i + 1) for i in range(pred_days)]
-        color5 = '#22c55e' if latest_diff > 0 else '#f44336'
-        self.ax.plot(future_x, pred5, color=color5, linewidth=1.2, linestyle='--', alpha=0.8)
-        direction = "多" if latest_diff > 0 else "空"
-        legend_handles.append(Line2D([0], [0], color=color5, linestyle='--', linewidth=1.2,
-                                     label=f'MA交叉({direction}) {pred5[-1]:.2f}'))
+        # 啟動旋轉動畫
+        self._pred_done_count = 0
+        self._pred_total_count = 16
+        self.root.after(0, self._init_pred_text_spinner, pred_days)
 
-        # 6. 布林通道（洋紅）
-        ma20 = np.convolve(y, np.ones(20)/20, mode='valid')
-        current_ma = ma20[-1]
-        current_std = np.std(y[-20:])
-        pred6 = []
-        for i in range(1, pred_days + 1):
-            decay = 0.95 ** i
-            pred6.append(current_ma + (S0 - current_ma) * decay)
-        self.ax.plot(future_x, pred6, color='#e040fb', linewidth=1.2, linestyle='--', alpha=0.8)
-        legend_handles.append(Line2D([0], [0], color='#e040fb', linestyle='--', linewidth=1.2,
-                                     label=f'布林 {pred6[-1]:.2f}'))
+        # 畫預測區域底色
+        def _draw_background():
+            if self._pred_generation != gen:
+                return
+            self.ax.axvspan(n - 1, n - 1 + pred_days, alpha=0.03, color='#bb86fc')
+            self.canvas.draw_idle()
+        self.root.after(0, _draw_background)
 
-        # 7. XGBoost（紅色）
-        xgb_pred, _ = self._calc_ai_prediction(df, pred_days)
-        if xgb_pred is not None:
-            xgb_future = np.arange(n, n + len(xgb_pred))
-            self.ax.plot(xgb_future, xgb_pred, color='#ff6b6b', linewidth=1.5, linestyle='--', alpha=0.9)
-            legend_handles.append(Line2D([0], [0], color='#ff6b6b', linestyle='--', linewidth=1.5,
-                                         label=f'XGBoost {xgb_pred[-1]:.2f}'))
+        def _worker():
+            """背景執行緒：依序計算 16 種方法，每完成一個就排程到主執行緒畫圖"""
+            legend_handles = []
+            final_values = []
 
-        # 8. 隨機森林（淺藍色）
-        rf_pred, _ = self._calc_rf_prediction(df, pred_days)
-        if rf_pred is not None:
-            rf_future = np.arange(n, n + len(rf_pred))
-            self.ax.plot(rf_future, rf_pred, color='#4fc3f7', linewidth=1.5, linestyle='--', alpha=0.9)
-            legend_handles.append(Line2D([0], [0], color='#4fc3f7', linestyle='--', linewidth=1.5,
-                                         label=f'隨機森林 {rf_pred[-1]:.2f}'))
+            def _schedule_draw(val, color, label):
+                """將計算結果排程到主執行緒畫圖"""
+                if val is None:
+                    self._pred_done_count += 1
+                    return
+                def _main():
+                    if self._pred_generation != gen:
+                        return
+                    future_xx = np.arange(n, n + len(val))
+                    self.ax.plot(future_xx, val, color=color, linewidth=1.5, linestyle='--', alpha=0.9)
+                    h = Line2D([0], [0], color=color, linestyle='--', linewidth=1.5,
+                               label=f'{label} {val[-1]:.2f}')
+                    self._pred_done_count += 1
+                    self._append_pred_text_item(label, val[-1], color, S0)
+                    self.canvas.draw_idle()
+                self.root.after(0, _main)
+                legend_handles.append((label, val[-1], color))
+                final_values.append((label, val[-1], color))
 
-        # 9. LightGBM（金色）
-        lgb_pred, _ = self._calc_lgb_prediction(df, pred_days)
-        if lgb_pred is not None:
-            lgb_future = np.arange(n, n + len(lgb_pred))
-            self.ax.plot(lgb_future, lgb_pred, color='#ffd700', linewidth=1.5, linestyle='--', alpha=0.9)
-            legend_handles.append(Line2D([0], [0], color='#ffd700', linestyle='--', linewidth=1.5,
-                                         label=f'LightGBM {lgb_pred[-1]:.2f}'))
+            # ═══════════ Phase 1：統計方法（快速） ═══════════
 
-        # 10. CatBoost（粉紅）
-        cb_pred, _ = self._calc_cb_prediction(df, pred_days)
-        if cb_pred is not None:
-            cb_future = np.arange(n, n + len(cb_pred))
-            self.ax.plot(cb_future, cb_pred, color='#ff69b4', linewidth=1.5, linestyle='--', alpha=0.9)
-            legend_handles.append(Line2D([0], [0], color='#ff69b4', linestyle='--', linewidth=1.5,
-                                         label=f'CatBoost {cb_pred[-1]:.2f}'))
+            # 1. 線性回歸（灰色）
+            try:
+                coeffs1 = np.polyfit(x, y, 1)
+                trend1 = np.polyval(coeffs1, x)
+                pred1 = np.polyval(coeffs1, future_x)
+                std1 = np.std(y - trend1)
+                _schedule_draw(pred1, '#888888', '線性')
+                # 畫信賴區間
+                def _fill_linear():
+                    if self._pred_generation != gen:
+                        return
+                    self.ax.fill_between(future_x, pred1 - std1, pred1 + std1, alpha=0.04, color='#888888')
+                self.root.after(0, _fill_linear)
+            except Exception:
+                self._pred_done_count += 1
 
-        # 11. Gradient Boosting（青色）
-        gb_pred, _ = self._calc_gb_prediction(df, pred_days)
-        if gb_pred is not None:
-            gb_future = np.arange(n, n + len(gb_pred))
-            self.ax.plot(gb_future, gb_pred, color='#00ffff', linewidth=1.5, linestyle='--', alpha=0.9)
-            legend_handles.append(Line2D([0], [0], color='#00ffff', linestyle='--', linewidth=1.5,
-                                         label=f'GBoost {gb_pred[-1]:.2f}'))
+            # 2. 多項式（橙色）
+            try:
+                c2 = np.polyfit(x, y, 2)
+                c3 = np.polyfit(x, y, 3)
+                pred2 = (np.polyval(c2, future_x) + np.polyval(c3, future_x)) / 2
+                std2 = np.std(y - np.polyval(c2, x))
+                _schedule_draw(pred2, '#ff9800', '多項式')
+                def _fill_poly():
+                    if self._pred_generation != gen:
+                        return
+                    self.ax.fill_between(future_x, pred2 - std2, pred2 + std2, alpha=0.04, color='#ff9800')
+                self.root.after(0, _fill_poly)
+            except Exception:
+                self._pred_done_count += 1
 
-        # 12. Extra Trees（萊姆綠）
-        et_pred, _ = self._calc_et_prediction(df, pred_days)
-        if et_pred is not None:
-            et_future = np.arange(n, n + len(et_pred))
-            self.ax.plot(et_future, et_pred, color='#32cd32', linewidth=1.5, linestyle='--', alpha=0.9)
-            legend_handles.append(Line2D([0], [0], color='#32cd32', linestyle='--', linewidth=1.5,
-                                         label=f'ExtraTree {et_pred[-1]:.2f}'))
+            # 3. 蒙地卡羅（紫色）
+            up_prob = 50.0
+            mc_mean = None
+            try:
+                returns = np.diff(y) / y[:-1]
+                mu, sigma = np.mean(returns), np.std(returns)
+                sims = np.zeros((200, pred_days))
+                for i in range(200):
+                    prices = [S0]
+                    for _ in range(pred_days):
+                        prices.append(prices[-1] * np.exp((mu - 0.5 * sigma**2) + sigma * np.random.normal()))
+                    sims[i, :] = prices[1:]
+                mc_mean = np.mean(sims, axis=0)
+                up_prob = np.mean(sims[:, -1] > S0) * 100
+                mc_p5 = np.percentile(sims, 5, axis=0)
+                mc_p95 = np.percentile(sims, 95, axis=0)
 
-        # 13. Stacking Ensemble（橘紅）
-        st_pred, _ = self._calc_stacking_prediction(df, pred_days)
-        if st_pred is not None:
-            st_future = np.arange(n, n + len(st_pred))
-            self.ax.plot(st_future, st_pred, color='#ff4500', linewidth=1.5, linestyle='--', alpha=0.9)
-            legend_handles.append(Line2D([0], [0], color='#ff4500', linestyle='--', linewidth=1.5,
-                                         label=f'Stacking {st_pred[-1]:.2f}'))
+                def _draw_mc():
+                    if self._pred_generation != gen:
+                        return
+                    for i in range(0, 200, 10):
+                        self.ax.plot(future_x, sims[i], color='#bb86fc', linewidth=0.2, alpha=0.1)
+                    self.ax.plot(future_x, mc_mean, color='#bb86fc', linewidth=1.5, linestyle='-')
+                    self.ax.fill_between(future_x, mc_p5, mc_p95, alpha=0.06, color='#bb86fc')
+                    # MC 機率文字
+                    self.ax.text(0.02, 0.82,
+                                 f'MC 上漲 {up_prob:.1f}% / 下跌 {100-up_prob:.1f}%　MA5/MA10 多頭',
+                                 transform=self.ax.transAxes, fontsize=8, color='#e0e0e0',
+                                 fontfamily=_CHINESE_FONT, verticalalignment='top',
+                                 bbox=dict(boxstyle='round,pad=0.3', facecolor='#1a1a2e', edgecolor='#555555'))
+                    self.canvas.draw_idle()
+                self.root.after(0, _draw_mc)
+                _schedule_draw(mc_mean, '#bb86fc', 'MC均值')
+            except Exception:
+                self._pred_done_count += 1
 
-        # 14. LSTM（深青色 #00897b）
-        lstm_pred = calc_dl_prediction(df, 'lstm', pred_days)
-        if lstm_pred is not None:
-            lstm_future = np.arange(n, n + len(lstm_pred))
-            self.ax.plot(lstm_future, lstm_pred, color='#00897b', linewidth=1.5, linestyle='--', alpha=0.9)
-            legend_handles.append(Line2D([0], [0], color='#00897b', linestyle='--', linewidth=1.5,
-                                         label=f'LSTM {lstm_pred[-1]:.2f}'))
+            # 4. 指數平滑（青色）
+            try:
+                alpha_es, beta_es = 0.3, 0.1
+                level = [y[0]]
+                trend_v = [y[1] - y[0] if n > 1 else 0]
+                for t in range(1, n):
+                    new_level = alpha_es * y[t] + (1 - alpha_es) * (level[-1] + trend_v[-1])
+                    new_trend = beta_es * (new_level - level[-1]) + (1 - beta_es) * trend_v[-1]
+                    level.append(new_level)
+                    trend_v.append(new_trend)
+                pred4 = [level[-1] + (i + 1) * trend_v[-1] for i in range(pred_days)]
+                _schedule_draw(np.array(pred4), '#00bcd4', '指數平滑')
+            except Exception:
+                self._pred_done_count += 1
 
-        # 15. GRU（玫紅 #c2185b）
-        gru_pred = calc_dl_prediction(df, 'gru', pred_days)
-        if gru_pred is not None:
-            gru_future = np.arange(n, n + len(gru_pred))
-            self.ax.plot(gru_future, gru_pred, color='#c2185b', linewidth=1.5, linestyle='--', alpha=0.9)
-            legend_handles.append(Line2D([0], [0], color='#c2185b', linestyle='--', linewidth=1.5,
-                                         label=f'GRU {gru_pred[-1]:.2f}'))
+            # 5. MA交叉（綠/紅）
+            try:
+                ma5 = np.convolve(y, np.ones(5)/5, mode='valid')
+                ma10 = np.convolve(y, np.ones(10)/10, mode='valid')
+                latest_diff = ma5[-1] - ma10[-1]
+                if len(ma5) >= 5:
+                    slope = np.polyfit(np.arange(5), ma5[-5:], 1)[0]
+                else:
+                    slope = latest_diff / max(len(ma5), 1)
+                pred5 = np.array([S0 + slope * (i + 1) for i in range(pred_days)])
+                color5 = '#22c55e' if latest_diff > 0 else '#f44336'
+                direction = "多" if latest_diff > 0 else "空"
+                _schedule_draw(pred5, color5, f'MA交叉({direction})')
+            except Exception:
+                self._pred_done_count += 1
 
-        # 16. Transformer（寶石藍 #5c6bc0）
-        tf_pred = calc_dl_prediction(df, 'transformer', pred_days)
-        if tf_pred is not None:
-            tf_future = np.arange(n, n + len(tf_pred))
-            self.ax.plot(tf_future, tf_pred, color='#5c6bc0', linewidth=1.5, linestyle='--', alpha=0.9)
-            legend_handles.append(Line2D([0], [0], color='#5c6bc0', linestyle='--', linewidth=1.5,
-                                         label=f'Transformer {tf_pred[-1]:.2f}'))
+            # 6. 布林通道（洋紅）
+            try:
+                ma20 = np.convolve(y, np.ones(20)/20, mode='valid')
+                current_ma = ma20[-1]
+                pred6 = np.array([current_ma + (S0 - current_ma) * (0.95 ** i) for i in range(1, pred_days + 1)])
+                _schedule_draw(pred6, '#e040fb', '布林')
+            except Exception:
+                self._pred_done_count += 1
 
-        self.ax.axvspan(n - 1, n - 1 + pred_days, alpha=0.03, color='#bb86fc')
+            # ═══════════ Phase 2：機器學習方法 ═══════════
 
-        # 機率文字
-        self.ax.text(0.02, 0.82,
-                     f'MC 上漲 {up_prob:.1f}% / 下跌 {100-up_prob:.1f}%　MA5/MA10 {direction}頭',
-                     transform=self.ax.transAxes, fontsize=8, color='#e0e0e0',
-                     fontfamily=_CHINESE_FONT, verticalalignment='top',
-                     bbox=dict(boxstyle='round,pad=0.3', facecolor='#1a1a2e', edgecolor='#555555'))
+            # 7. XGBoost（紅色）
+            try:
+                xgb_pred, _ = self._calc_ai_prediction(df, pred_days)
+                _schedule_draw(xgb_pred, '#ff6b6b', 'XGBoost')
+            except Exception:
+                self._pred_done_count += 1
 
-        # ── 收集所有最終值，按價格排序後在圖上以曲線顏色標註 ──
-        final_values = [
-            ('線性', pred1[-1], '#888888'), ('多項式', pred2[-1], '#ff9800'),
-            ('MC均值', mc_mean[-1], '#bb86fc'), ('指數平滑', pred4[-1], '#00bcd4'),
-            ('MA交叉', pred5[-1], color5), ('布林', pred6[-1], '#e040fb'),
-        ]
-        if xgb_pred is not None:
-            final_values.append(('XGBoost', xgb_pred[-1], '#ff6b6b'))
-        if rf_pred is not None:
-            final_values.append(('RF', rf_pred[-1], '#4fc3f7'))
-        if lgb_pred is not None:
-            final_values.append(('LGBM', lgb_pred[-1], '#ffd700'))
-        if cb_pred is not None:
-            final_values.append(('CatB', cb_pred[-1], '#ff69b4'))
-        if gb_pred is not None:
-            final_values.append(('GBoost', gb_pred[-1], '#00ffff'))
-        if et_pred is not None:
-            final_values.append(('ET', et_pred[-1], '#32cd32'))
-        if st_pred is not None:
-            final_values.append(('Stack', st_pred[-1], '#ff4500'))
-        if lstm_pred is not None:
-            final_values.append(('LSTM', lstm_pred[-1], '#00897b'))
-        if gru_pred is not None:
-            final_values.append(('GRU', gru_pred[-1], '#c2185b'))
-        if tf_pred is not None:
-            final_values.append(('TF', tf_pred[-1], '#5c6bc0'))
-        final_values.sort(key=lambda x: x[1], reverse=True)
+            # 8. 隨機森林（淺藍色）
+            try:
+                rf_pred, _ = self._calc_rf_prediction(df, pred_days)
+                _schedule_draw(rf_pred, '#4fc3f7', '隨機森林')
+            except Exception:
+                self._pred_done_count += 1
 
-        self.ax.legend(handles=legend_handles, fontsize=7, loc='lower right',
-                       facecolor='#0d1117', edgecolor='#555555', labelcolor='#e0e0e0', ncol=3)
+            # 9. LightGBM（金色）
+            try:
+                lgb_pred, _ = self._calc_lgb_prediction(df, pred_days)
+                _schedule_draw(lgb_pred, '#ffd700', 'LightGBM')
+            except Exception:
+                self._pred_done_count += 1
 
-        # 用 tkinter Text 依線圖顏色顯示預測值
-        self._update_pred_text(final_values, pred_days)
+            # 10. CatBoost（粉紅）
+            try:
+                cb_pred, _ = self._calc_cb_prediction(df, pred_days)
+                _schedule_draw(cb_pred, '#ff69b4', 'CatBoost')
+            except Exception:
+                self._pred_done_count += 1
+
+            # 11. Gradient Boosting（青色）
+            try:
+                gb_pred, _ = self._calc_gb_prediction(df, pred_days)
+                _schedule_draw(gb_pred, '#00ffff', 'GBoost')
+            except Exception:
+                self._pred_done_count += 1
+
+            # 12. Extra Trees（萊姆綠）
+            try:
+                et_pred, _ = self._calc_et_prediction(df, pred_days)
+                _schedule_draw(et_pred, '#32cd32', 'ExtraTree')
+            except Exception:
+                self._pred_done_count += 1
+
+            # 13. Stacking Ensemble（橘紅）
+            try:
+                st_pred, _ = self._calc_stacking_prediction(df, pred_days)
+                _schedule_draw(st_pred, '#ff4500', 'Stacking')
+            except Exception:
+                self._pred_done_count += 1
+
+            # ═══════════ Phase 3：深度學習方法（最慢） ═══════════
+
+            # 14. LSTM（深青色）
+            try:
+                lstm_pred = calc_dl_prediction(df, 'lstm', pred_days)
+                _schedule_draw(lstm_pred, '#00897b', 'LSTM')
+            except Exception:
+                self._pred_done_count += 1
+
+            # 15. GRU（玫紅色）
+            try:
+                gru_pred = calc_dl_prediction(df, 'gru', pred_days)
+                _schedule_draw(gru_pred, '#c2185b', 'GRU')
+            except Exception:
+                self._pred_done_count += 1
+
+            # 16. Transformer（寶石藍）
+            try:
+                tf_pred = calc_dl_prediction(df, 'transformer', pred_days)
+                _schedule_draw(tf_pred, '#5c6bc0', 'Transformer')
+            except Exception:
+                self._pred_done_count += 1
+
+            # ═══════════ 最終整理 ═══════════
+            def _finalize():
+                if self._pred_generation != gen:
+                    return
+                # 排序 legend
+                legend_handles.sort(key=lambda h: h[1], reverse=True)
+                handles = [Line2D([0], [0], color=h[2], linestyle='--', linewidth=1.5,
+                                  label=f'{h[0]} {h[1]:.2f}') for h in legend_handles]
+                self.ax.legend(handles=handles, fontsize=7, loc='lower right',
+                               facecolor='#0d1117', edgecolor='#555555', labelcolor='#e0e0e0', ncol=3)
+                self._finalize_pred_text(final_values, pred_days)
+                self.canvas.draw_idle()
+            self.root.after(50, _finalize)
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     def _pred_linear(self, df, close, pred_days):
         """線性回歸預測"""
