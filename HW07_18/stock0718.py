@@ -665,10 +665,14 @@ class StockApp:
         # 預測值區：用 tk.Text 支援多色文字，依線圖顏色顯示
         self.pred_frame = ttk.Frame(root)
         self.pred_frame.pack(fill=tk.X, padx=10, pady=(0, 2))
-        self.pred_text_widget = tk.Text(self.pred_frame, height=3, wrap=tk.WORD,
+        self.pred_text_widget = tk.Text(self.pred_frame, height=4, wrap=tk.NONE,
                                         bg='#ffffff', fg='#333333', font=(_CHINESE_FONT, 10),
                                         borderwidth=1, relief='solid', padx=8, pady=4)
         self.pred_text_widget.pack(fill=tk.X)
+        self.pred_text_scroll_x = tk.Scrollbar(self.pred_frame, orient=tk.HORIZONTAL,
+                                                command=self.pred_text_widget.xview)
+        self.pred_text_widget.config(xscrollcommand=self.pred_text_scroll_x.set)
+        self.pred_text_scroll_x.pack(fill=tk.X)
         self.pred_text_widget.insert('1.0', '查詢後自動預測...')
         self.pred_text_widget.config(state=tk.DISABLED)
         # 定義顏色標籤（與線圖顏色對應）
@@ -964,23 +968,25 @@ class StockApp:
     def _init_pred_text_spinner(self, pred_days):
         """初始化預測文字框：標頭 + 底部旋轉動畫行"""
         S0 = self._last_df['Close'].values[-1] if self._last_df is not None else 0
-        self.pred_text_widget.config(state=tk.NORMAL, height=3)
+        self.pred_text_widget.config(state=tk.NORMAL, height=4)
         self.pred_text_widget.delete('1.0', tk.END)
-        header = f'目前股價: {S0:.2f}  |  預測{pred_days}日  |  方法: 全部\n'
+        header = f'目前 {S0:.2f}  |  預測{pred_days}日  |  全部\n'
         self.pred_text_widget.insert(tk.END, header)
         self.pred_text_widget.tag_add('header', '1.0', '1.end')
         self.pred_text_widget.tag_config('header', foreground='#333333', font=(_CHINESE_FONT, 10, 'bold'))
+        # 預留一行放結果（橫排）
+        self.pred_text_widget.insert(tk.END, '\n')
         # 旋轉動畫行（固定在最後一行）
         self.pred_text_widget.insert(tk.END, '  ⠋ 正在計算預測... 0/16\n')
         self.pred_text_widget.tag_config('spin', foreground='#888888', font=(_CHINESE_FONT, 9))
-        self.pred_text_widget.tag_add('spin', 'end - 2l', 'end - 1c')
+        self.pred_text_widget.tag_add('spin', 'end - 1l', 'end - 1c')
         self.pred_text_widget.config(state=tk.DISABLED)
         self._pred_spinner_running = True
         self._pred_spinner_idx = 0
         self._tick_pred_spinner()
 
     def _tick_pred_spinner(self):
-        """每 100ms 更新旋轉動畫行（只替換最後一行的文字）"""
+        """每 100ms 更新旋轉動畫行（只替換最後一行）"""
         if not self._pred_spinner_running:
             return
         ch = self._SPIN_FRAMES[self._pred_spinner_idx % len(self._SPIN_FRAMES)]
@@ -988,12 +994,10 @@ class StockApp:
         total = self._pred_total_count
         spin_text = f'  {ch} 正在計算預測... {done}/{total}'
         self.pred_text_widget.config(state=tk.NORMAL)
-        # 刪除舊的旋轉行（最後一行）
-        self.pred_text_widget.delete('end - 2l', 'end - 1c')
-        # 插入新的旋轉行
+        self.pred_text_widget.delete('end - 1l', 'end - 1c')
         self.pred_text_widget.insert(tk.END, spin_text + '\n')
         self.pred_text_widget.tag_config('spin', foreground='#888888', font=(_CHINESE_FONT, 9))
-        self.pred_text_widget.tag_add('spin', 'end - 2l', 'end - 1c')
+        self.pred_text_widget.tag_add('spin', 'end - 1l', 'end - 1c')
         self.pred_text_widget.config(state=tk.DISABLED)
         self._pred_spinner_idx += 1
         self.root.after(100, self._tick_pred_spinner)
@@ -1003,43 +1007,46 @@ class StockApp:
         self._pred_spinner_running = False
 
     def _append_pred_text_item(self, name, val, color, S0):
-        """在旋轉行之前插入一行彩色預測結果（即時顯示用）"""
+        """往右橫排追加一筆預測結果（在旋轉行之前）"""
         pct = (val - S0) / S0 * 100 if S0 else 0
         arrow = '▲' if pct > 0 else '▼' if pct < 0 else '─'
-        line_text = f'  {name}: {val:.2f}  ({arrow}{pct:+.2f}%)\n'
+        item_text = f'  {name}: {val:.2f} ({arrow}{pct:+.2f}%)  '
         self.pred_text_widget.config(state=tk.NORMAL)
-        # 在旋轉行（最後一行）之前插入
-        insert_pos = 'end - 2c'
-        cur_line = int(self.pred_text_widget.index(insert_pos).split('.')[0])
-        tag = f'pred_{cur_line}'
-        self.pred_text_widget.insert(insert_pos, line_text)
+        # 在最後一行（旋轉行）之前，第 2 行結尾追加
+        insert_pos = 'end - 1l'
+        tag = f'pred_{name}'
+        self.pred_text_widget.insert(insert_pos, item_text)
         self.pred_text_widget.tag_config(tag, foreground=color, font=(_CHINESE_FONT, 10, 'bold'))
-        self.pred_text_widget.tag_add(tag, f'{cur_line}.0', f'{cur_line}.end - 1c')
-        # 自動調整高度（上限 12 行）
-        new_lines = int(self.pred_text_widget.index('end-1c').split('.')[0])
-        self.pred_text_widget.config(height=min(max(new_lines, 3), 12))
+        start = self.pred_text_widget.index(f'insert - {len(item_text)}c')
+        end = self.pred_text_widget.index('insert - 1c')
+        self.pred_text_widget.tag_add(tag, start, end)
         self.pred_text_widget.config(state=tk.DISABLED)
 
     def _finalize_pred_text(self, final_values, pred_days):
-        """所有方法完成後，重建文字框並依價格排序顯示最終結果"""
+        """所有方法完成後，往右橫排顯示所有預測結果"""
         S0 = self._last_df['Close'].values[-1] if self._last_df is not None else 0
         self._stop_pred_spinner()
         final_values.sort(key=lambda x: x[1], reverse=True)
-        self.pred_text_widget.config(state=tk.NORMAL, height=min(len(final_values) + 2, 12))
+        self.pred_text_widget.config(state=tk.NORMAL, height=5)
         self.pred_text_widget.delete('1.0', tk.END)
-        header = f'目前股價: {S0:.2f}  |  預測{pred_days}日  |  方法: 全部\n'
+        header = f'目前 {S0:.2f}  |  預測{pred_days}日  |  全部\n'
         self.pred_text_widget.insert(tk.END, header)
         self.pred_text_widget.tag_add('header', '1.0', '1.end')
         self.pred_text_widget.tag_config('header', foreground='#333333', font=(_CHINESE_FONT, 10, 'bold'))
-        for i, (name, val, clr) in enumerate(final_values):
-            pct = (val - S0) / S0 * 100 if S0 else 0
-            arrow = '▲' if pct > 0 else '▼' if pct < 0 else '─'
-            tag = f'line_{i}'
-            line_text = f'  {name}: {val:.2f}  ({arrow}{pct:+.2f}%)\n'
-            self.pred_text_widget.insert(tk.END, line_text)
-            self.pred_text_widget.tag_config(tag, foreground=clr, font=(_CHINESE_FONT, 10, 'bold'))
-            line_no = i + 2
-            self.pred_text_widget.tag_add(tag, f'{line_no}.0', f'{line_no}.end')
+        # 每行放 5~6 項，往右橫排
+        items_per_line = 6
+        for row_idx in range(0, len(final_values), items_per_line):
+            row_items = final_values[row_idx:row_idx + items_per_line]
+            for i, (name, val, clr) in enumerate(row_items):
+                pct = (val - S0) / S0 * 100 if S0 else 0
+                arrow = '▲' if pct > 0 else '▼' if pct < 0 else '─'
+                tag = f'item_{row_idx + i}'
+                self.pred_text_widget.insert(tk.END, f'  {name}: {val:.2f} ({arrow}{pct:+.2f}%)  ')
+                self.pred_text_widget.tag_config(tag, foreground=clr, font=(_CHINESE_FONT, 10, 'bold'))
+                start = self.pred_text_widget.index(f'insert - {len(f"  {name}: {val:.2f} ({arrow}{pct:+.2f}%)  ")}c')
+                end = self.pred_text_widget.index('insert - 1c')
+                self.pred_text_widget.tag_add(tag, start, end)
+            self.pred_text_widget.insert(tk.END, '\n')
         self.pred_text_widget.config(state=tk.DISABLED)
 
     def _draw_prediction(self, df, close, pred_days):
@@ -1129,8 +1136,8 @@ class StockApp:
         S0 = y[-1]
 
         # 遞增 generation，使之前的舊執行緒自動失效
-        gen = self._pred_generation
         self._pred_generation += 1
+        gen = self._pred_generation
 
         # 啟動旋轉動畫
         self._pred_done_count = 0
@@ -1142,7 +1149,7 @@ class StockApp:
             if self._pred_generation != gen:
                 return
             self.ax.axvspan(n - 1, n - 1 + pred_days, alpha=0.03, color='#bb86fc')
-            self.canvas.draw_idle()
+            self.canvas.draw()
         self.root.after(0, _draw_background)
 
         def _worker():
@@ -1164,7 +1171,9 @@ class StockApp:
                                label=f'{label} {val[-1]:.2f}')
                     self._pred_done_count += 1
                     self._append_pred_text_item(label, val[-1], color, S0)
-                    self.canvas.draw_idle()
+                    self.ax.relim()
+                    self.ax.autoscale_view()
+                    self.canvas.draw()
                 self.root.after(0, _main)
                 legend_handles.append((label, val[-1], color))
                 final_values.append((label, val[-1], color))
@@ -1202,7 +1211,47 @@ class StockApp:
             except Exception:
                 self._pred_done_count += 1
 
-            # 3. 蒙地卡羅（紫色）
+            # 3. 指數平滑（青色）
+            try:
+                alpha_es, beta_es = 0.3, 0.1
+                level = [y[0]]
+                trend_v = [y[1] - y[0] if n > 1 else 0]
+                for t in range(1, n):
+                    new_level = alpha_es * y[t] + (1 - alpha_es) * (level[-1] + trend_v[-1])
+                    new_trend = beta_es * (new_level - level[-1]) + (1 - beta_es) * trend_v[-1]
+                    level.append(new_level)
+                    trend_v.append(new_trend)
+                pred4 = [level[-1] + (i + 1) * trend_v[-1] for i in range(pred_days)]
+                _schedule_draw(np.array(pred4), '#00bcd4', '指數平滑')
+            except Exception:
+                self._pred_done_count += 1
+
+            # 4. MA交叉（綠/紅）
+            try:
+                ma5 = np.convolve(y, np.ones(5)/5, mode='valid')
+                ma10 = np.convolve(y, np.ones(10)/10, mode='valid')
+                latest_diff = ma5[-1] - ma10[-1]
+                if len(ma5) >= 5:
+                    slope = np.polyfit(np.arange(5), ma5[-5:], 1)[0]
+                else:
+                    slope = latest_diff / max(len(ma5), 1)
+                pred5 = np.array([S0 + slope * (i + 1) for i in range(pred_days)])
+                color5 = '#22c55e' if latest_diff > 0 else '#f44336'
+                direction = "多" if latest_diff > 0 else "空"
+                _schedule_draw(pred5, color5, f'MA交叉({direction})')
+            except Exception:
+                self._pred_done_count += 1
+
+            # 5. 布林通道（洋紅）
+            try:
+                ma20 = np.convolve(y, np.ones(20)/20, mode='valid')
+                current_ma = ma20[-1]
+                pred6 = np.array([current_ma + (S0 - current_ma) * (0.95 ** i) for i in range(1, pred_days + 1)])
+                _schedule_draw(pred6, '#e040fb', '布林')
+            except Exception:
+                self._pred_done_count += 1
+
+            # 6. 蒙地卡羅（紫色）——200模擬較慢，擺最後
             up_prob = 50.0
             mc_mean = None
             try:
@@ -1238,59 +1287,19 @@ class StockApp:
             except Exception:
                 self._pred_done_count += 1
 
-            # 4. 指數平滑（青色）
-            try:
-                alpha_es, beta_es = 0.3, 0.1
-                level = [y[0]]
-                trend_v = [y[1] - y[0] if n > 1 else 0]
-                for t in range(1, n):
-                    new_level = alpha_es * y[t] + (1 - alpha_es) * (level[-1] + trend_v[-1])
-                    new_trend = beta_es * (new_level - level[-1]) + (1 - beta_es) * trend_v[-1]
-                    level.append(new_level)
-                    trend_v.append(new_trend)
-                pred4 = [level[-1] + (i + 1) * trend_v[-1] for i in range(pred_days)]
-                _schedule_draw(np.array(pred4), '#00bcd4', '指數平滑')
-            except Exception:
-                self._pred_done_count += 1
-
-            # 5. MA交叉（綠/紅）
-            try:
-                ma5 = np.convolve(y, np.ones(5)/5, mode='valid')
-                ma10 = np.convolve(y, np.ones(10)/10, mode='valid')
-                latest_diff = ma5[-1] - ma10[-1]
-                if len(ma5) >= 5:
-                    slope = np.polyfit(np.arange(5), ma5[-5:], 1)[0]
-                else:
-                    slope = latest_diff / max(len(ma5), 1)
-                pred5 = np.array([S0 + slope * (i + 1) for i in range(pred_days)])
-                color5 = '#22c55e' if latest_diff > 0 else '#f44336'
-                direction = "多" if latest_diff > 0 else "空"
-                _schedule_draw(pred5, color5, f'MA交叉({direction})')
-            except Exception:
-                self._pred_done_count += 1
-
-            # 6. 布林通道（洋紅）
-            try:
-                ma20 = np.convolve(y, np.ones(20)/20, mode='valid')
-                current_ma = ma20[-1]
-                pred6 = np.array([current_ma + (S0 - current_ma) * (0.95 ** i) for i in range(1, pred_days + 1)])
-                _schedule_draw(pred6, '#e040fb', '布林')
-            except Exception:
-                self._pred_done_count += 1
-
             # ═══════════ Phase 2：機器學習方法 ═══════════
 
-            # 7. XGBoost（紅色）
+            # 7. Extra Trees（萊姆綠）——最快
+            try:
+                et_pred, _ = self._calc_et_prediction(df, pred_days)
+                _schedule_draw(et_pred, '#32cd32', 'ExtraTree')
+            except Exception:
+                self._pred_done_count += 1
+
+            # 8. XGBoost（紅色）
             try:
                 xgb_pred, _ = self._calc_ai_prediction(df, pred_days)
                 _schedule_draw(xgb_pred, '#ff6b6b', 'XGBoost')
-            except Exception:
-                self._pred_done_count += 1
-
-            # 8. 隨機森林（淺藍色）
-            try:
-                rf_pred, _ = self._calc_rf_prediction(df, pred_days)
-                _schedule_draw(rf_pred, '#4fc3f7', '隨機森林')
             except Exception:
                 self._pred_done_count += 1
 
@@ -1308,21 +1317,21 @@ class StockApp:
             except Exception:
                 self._pred_done_count += 1
 
-            # 11. Gradient Boosting（青色）
+            # 11. 隨機森林（淺藍色）
+            try:
+                rf_pred, _ = self._calc_rf_prediction(df, pred_days)
+                _schedule_draw(rf_pred, '#4fc3f7', '隨機森林')
+            except Exception:
+                self._pred_done_count += 1
+
+            # 12. Gradient Boosting（青色）
             try:
                 gb_pred, _ = self._calc_gb_prediction(df, pred_days)
                 _schedule_draw(gb_pred, '#00ffff', 'GBoost')
             except Exception:
                 self._pred_done_count += 1
 
-            # 12. Extra Trees（萊姆綠）
-            try:
-                et_pred, _ = self._calc_et_prediction(df, pred_days)
-                _schedule_draw(et_pred, '#32cd32', 'ExtraTree')
-            except Exception:
-                self._pred_done_count += 1
-
-            # 13. Stacking Ensemble（橘紅）
+            # 13. Stacking Ensemble（橘紅）——最慢
             try:
                 st_pred, _ = self._calc_stacking_prediction(df, pred_days)
                 _schedule_draw(st_pred, '#ff4500', 'Stacking')
@@ -2309,10 +2318,16 @@ class StockApp:
         self.ax_kd.grid(True, linestyle='--', alpha=0.15, color=self._grid_color)
         self.ax_kd.yaxis.set_label_position('right')
         self.ax_kd.tick_params(labelleft=False, labelright=True)
-        # KD 數值顯示
+        # KD 數值顯示（自動偵測位置，避免遮住 K/D 線）
         kd_text = f"KD  9K:{latest_k:.2f}  9D:{latest_d:.2f}"
-        t = self.ax_kd.text(0.01, 0.95, kd_text, transform=self.ax_kd.transAxes,
-                            fontsize=9, color='#e0e0e0', va='top', ha='left',
+        _k_first = k_val.iloc[0]
+        _d_first = d_val.iloc[0]
+        if _k_first > 75 or _d_first > 75:
+            _kd_x, _kd_y, _kd_va = 0.01, 0.05, 'bottom'
+        else:
+            _kd_x, _kd_y, _kd_va = 0.01, 0.95, 'top'
+        t = self.ax_kd.text(_kd_x, _kd_y, kd_text, transform=self.ax_kd.transAxes,
+                            fontsize=9, color='#e0e0e0', va=_kd_va, ha='left',
                             bbox=dict(boxstyle='round,pad=0.3', facecolor='#0d1117', alpha=0.8))
         self._ma_texts.append(t)
         self.ax_kd.legend(fontsize=9, loc='upper right', facecolor='#0d1117',
